@@ -54,7 +54,7 @@ class Config:
     # 实时识别配置
     REALTIME_MODEL = "paraformer-zh-streaming"
     REALTIME_CHUNK_SIZE = [0, 10, 5]  # 600ms延迟
-    REALTIME_DEVICE = "cpu"
+    REALTIME_DEVICE = "cuda"  # 使用GPU加速
     REALTIME_NCPU = 4
 
     # 批量识别配置
@@ -62,7 +62,7 @@ class Config:
     BATCH_VAD_MODEL = "fsmn-vad"
     BATCH_PUNC_MODEL = "ct-punc-c"
     BATCH_SPK_MODEL = "cam++"
-    BATCH_DEVICE = "cpu"
+    BATCH_DEVICE = "cuda"  # 使用GPU加速
     BATCH_NCPU = 4
     BATCH_SIZE_S = 300
     BATCH_HOTWORD = "魔搭"

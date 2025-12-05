@@ -57,9 +57,9 @@
 
 - **Python**: 3.10 或更高版本
 - **操作系统**: Linux / macOS / Windows
-- **内存**: 推荐 8GB 以上
-- **磁盘空间**: 约 3GB (用于模型缓存)
-- **GPU** (可选): CUDA 11.x+ 用于加速推理
+- **内存**: 推荐 16GB 以上
+- **磁盘空间**: 约 20GB (ASR模型3GB + LLM模型14GB)
+- **GPU**: NVIDIA GPU + CUDA 11.x+ (推荐，~14GB显存用于LLM)
 
 ## 🚀 快速开始
 
@@ -78,14 +78,21 @@ chmod +x setup.sh
 ### 步骤2: 启动服务
 
 ```bash
-# 基础启动（默认启用增强和LLM）
+# 基础启动（默认启用语音增强和LLM后处理）
 python main.py
+
+# 仅ASR模式（关闭LLM，节省资源）
+# 修改 main.py 中 Config.ENABLE_LLM_POSTPROCESS = False
 
 # 生产环境（多进程）
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-服务启动后会自动下载所需模型到 `./Model` 目录。
+**首次启动**: 会自动下载所需模型到 `./Model` 目录
+
+- ASR模型: ~3GB (Paraformer系列)
+- 语音增强: ~100MB (ClearerVoice-Studio)
+- LLM模型: ~14GB (Qwen2.5-7B-Instruct)
 
 ### 步骤3: 验证服务
 
@@ -97,7 +104,7 @@ curl http://localhost:8000/health
 curl http://localhost:8000/connections
 ```
 
-**提示**: 首次启动需要下载约3GB模型文件，请耐心等待。
+**提示**: 首次启动需要下载约17GB模型文件，请确保网络畅通和磁盘空间充足。
 
 ## 📚 使用指南
 
@@ -235,11 +242,20 @@ class Config:
 ### 功能开关
 
 ```python
-    ENABLE_AUDIO_ENHANCEMENT = True   # 语音增强
-    ENABLE_LLM_POSTPROCESS = True     # LLM后处理
-    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 蒸馏模型
-    LLM_DEVICE = "cuda"               # LLM设备（可选cpu）
+    # 语音增强（推荐开启）
+    ENABLE_AUDIO_ENHANCEMENT = True
+    
+    # LLM后处理（需要GPU或较强CPU）
+    ENABLE_LLM_POSTPROCESS = True
+    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 7B蒸馏模型
+    LLM_DEVICE = "cuda"  # cuda(GPU) 或 cpu
 ```
+
+**硬件建议**:
+
+- **最小配置**: CPU + 8GB内存 (仅ASR，关闭LLM)
+- **推荐配置**: GPU(14GB显存) + 16GB内存 (完整功能)
+- **最佳配置**: GPU(24GB显存) + 32GB内存 (生产环境)
 
 ## 📊 API 端点
 
@@ -268,16 +284,51 @@ class Config:
 
 ```text
 mcp-server-funasr/
-├── main.py                       # 服务器主程序
-├── pyproject.toml                # 项目配置
+├── main.py                       # 服务器主程序 (FastMCP+Starlette)
+├── pyproject.toml                # 项目配置和依赖
+├── setup.sh                      # 一键安装脚本
+├── download_models.py            # 模型下载工具
 ├── client_batch.py               # 批量识别客户端
 ├── client_realtime.py            # 实时识别客户端
 ├── core/                         # 核心模块
 │   ├── batch_transcriber.py      # 批量识别器
-│   └── realtime_transcriber.py   # 实时识别器
-├── audio/                        # 测试音频
+│   ├── realtime_transcriber.py   # 实时识别器
+│   ├── audio_enhancer.py         # 语音增强器
+│   └── llm_postprocessor.py      # LLM后处理器
+├── audio/                        # 测试音频样本
 └── Model/                        # 模型缓存(自动下载)
+    └── models/
+        ├── iic/                  # FunASR + ClearerVoice
+        └── Qwen/                 # Qwen2.5-7B-Instruct
 ```
+
+## ❓ 常见问题
+
+### Q: LLM后处理需要GPU吗？
+
+**A**: 推荐使用GPU，但非必需
+
+- **GPU模式**: ~14GB显存，推理快 (推荐)
+- **CPU模式**: 较慢但可用，需要16GB+内存
+
+配置: 修改 `main.py` 中 `Config.LLM_DEVICE = "cpu"`
+
+### Q: 如何降低资源占用？
+
+**A**: 可以关闭LLM后处理
+
+```python
+Config.ENABLE_LLM_POSTPROCESS = False  # 仅使用ASR
+```
+
+这样只需要 ~3GB 磁盘空间和 8GB 内存。
+
+### Q: 支持哪些音频格式？
+
+**A**: 支持常见格式
+
+- 推荐: WAV (16kHz, 16-bit, mono)
+- 支持: MP3, FLAC, OGG, WEBM等
 
 ## 🔍 故障排除
 
@@ -316,45 +367,44 @@ curl http://localhost:8000/connections
 
 ## 📝 性能优化
 
-### CPU 优化
+### ASR 优化
 
-- 增加 `ncpu` 参数(如 8-16)
-- 使用多进程: `--workers 4`
+```python
+# GPU优化 (默认)
+Config.BATCH_DEVICE = "cuda"       # 使用GPU加速
+Config.REALTIME_DEVICE = "cuda"    # 实时识别也使用GPU
+Config.BATCH_SIZE_S = 300          # 调整批处理大小
 
-### GPU 优化
+# CPU模式 (备选)
+Config.BATCH_DEVICE = "cpu"        # 如无GPU可用
+Config.BATCH_NCPU = 8              # 增加CPU线程数
+```
 
-- 设置 `device="cuda:0"`
-- 调整 `batch_size_s`
+### LLM 优化
 
-### 并发优化
+```python
+# 使用量化模型（开发中）
+# LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
 
-- Nginx 反向代理
-- Redis 会话管理
-- 多实例部署
+# 使用更小的模型
+LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct"  # 更快但效果稍差
+```
+
+### 生产部署
+
+```bash
+# 多进程部署
+uvicorn main:app --workers 4 --host 0.0.0.0 --port 8000
+
+# Nginx反向代理
+# 负载均衡 + SSL终端
+
+# Docker部署
+# 容器化部署，资源隔离
+```
 
 ## 📝 更新日志
 
-### v0.5.0 (2025-12-05) - AI增强版
-
-#### 核心功能
-
-- ✨ 深度语音增强 (ClearerVoice-Studio DNS-Challenge)
-- ✨ LLM后处理优化 (本地Qwen3-235B)
-- ✨ 代码重构 (Config类集中管理)
-- 🎯 专业级降噪处理
-- 🎯 模型内置VAD（零额外延迟）
-
-#### 系统改进
-
-- 🔧 完全本地化部署，移除OpenAI依赖
-- 🔧 简化依赖，清理不必要的包
-- 🔧 并发安全保护
-- 📊 实时监控和统计
-
-### v0.3.0 (2025-12-04)
-
-- ✨ 统一实时客户端（显示/输入法模式）
-- 🐛 修复内存泄漏和噪音误触发
 
 ## 🤝 贡献指南
 
