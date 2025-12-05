@@ -1,10 +1,29 @@
-"""批量语音识别模块
+"""批量语音识别模块 v0.3.0
 
-参考FunASR最佳实践,实现非流式批量语音识别,支持VAD分段和批量处理。
+参考FunASR和ModelScope官方最佳实践，实现非流式批量语音识别，支持VAD分段和批量处理。
+
+功能特性:
+- 使用 Paraformer-large 模型进行高精度离线识别
+- 集成 FSMN-VAD 进行智能语音分段
+- 支持 CT-Transformer 标点符号恢复 (可选)
+- 支持 CAM++ 说话人分离 (可选)
+- 支持热词定制 (hotword参数)
+- 动态批处理优化性能 (batch_size_s=300推荐)
+- 线程安全设计
+
+模型配置:
+- ASR: paraformer-zh (Paraformer-large)
+- VAD: fsmn-vad (FSMN-VAD)
+- PUNC: ct-punc-c (CT-Transformer, 可选)
+- SPK: cam++ (CAM++, 可选)
 
 参考文档:
 - https://github.com/modelscope/FunASR/blob/main/docs/tutorial/README_zh.md
-- https://github.com/modelscope/FunASR/blob/main/examples/industrial_data_pretraining/sense_voice/README.md
+- https://modelscope.cn/models/iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
+- https://github.com/modelscope/FunASR/blob/main/examples/industrial_data_pretraining/paraformer/
+
+版本: 0.3.0
+更新日期: 2025-12-05
 """
 
 import funasr
@@ -30,65 +49,83 @@ class BatchTranscriber:
 
     def __init__(
         self,
-        asr_model_path: str = "paraformer-zh",
-        vad_model_path: str = "fsmn-vad",
+        model: str = "paraformer-zh",
+        vad_model: str = "fsmn-vad",
+        punc_model: str = None,
+        spk_model: str = None,
         device: str = "cpu",
         ncpu: int = 4,
         vad_kwargs: Optional[Dict[str, Any]] = None,
-        asr_kwargs: Optional[Dict[str, Any]] = None,
+        batch_size_s: int = 300,
+        model_hub: str = "ms",
+        **kwargs,
     ):
         """初始化批量语音识别器
 
         参数:
-            asr_model_path: ASR模型简称或ModelScope ID
-                           默认: paraformer-zh (官方批量识别模型)
-                           ModelScope: damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch
-                           支持VAD分段、时间戳输出、热词等功能
-            vad_model_path: VAD模型简称或ModelScope ID
-                           默认: fsmn-vad
-                           ModelScope: damo/speech_fsmn_vad_zh-cn-16k-common-pytorch
-            device: 运行设备 ("cpu", "cuda:0", "cuda:1", etc.)
-            ncpu: CPU线程数 (仅在device="cpu"时有效)
-            vad_kwargs: VAD模型参数,如 {"max_single_segment_time": 30000}
-            asr_kwargs: ASR推理参数,如 {"batch_size_s": 60, "use_itn": True}
+            model: ASR批量模型 (默认: "paraformer-zh")
+            vad_model: VAD模型 (默认: "fsmn-vad")
+            punc_model: 标点恢复模型 (可选: "ct-punc-c")
+            spk_model: 说话人识别模型 (可选: "cam++")
+            device: 运行设备 ("cpu" 或 "cuda:0")
+            ncpu: CPU线程数
+            vad_kwargs: VAD参数，如 {"max_single_segment_time": 30000}
+            batch_size_s: 动态批处理每批总时长(秒, 推荐300)
+            model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace)
+            **kwargs: 其他参数 (如hotword热词)
         """
+        self.model = model
+        self.vad_model = vad_model
+        self.punc_model = punc_model
+        self.spk_model = spk_model
         self.device = device
         self.ncpu = ncpu
-        self.asr_model_path = asr_model_path
-        self.vad_model_path = vad_model_path
+        self.model_hub = model_hub
+        self.batch_size_s = batch_size_s
 
-        # VAD参数配置 (参考FunASR文档)
-        self.vad_kwargs = {"max_single_segment_time": 30000}  # VAD最大分段时长(ms)
+        # VAD参数
+        self.vad_kwargs = {"max_single_segment_time": 30000}
         if vad_kwargs:
             self.vad_kwargs.update(vad_kwargs)
 
-        # ASR推理默认参数 (参考FunASR最佳实践)
-        self.asr_kwargs = {
-            "batch_size_s": 60,  # 动态批处理:每批总时长(秒)
-            "use_itn": True,  # 使用逆文本归一化
-            "merge_vad": True,  # 合并短VAD片段
-            "merge_length_s": 15,  # VAD片段合并长度(秒)
-        }
-        if asr_kwargs:
-            self.asr_kwargs.update(asr_kwargs)
+        # 热词支持 (参考魔搭官网示例)
+        self.hotword = kwargs.pop("hotword", None)
+
+        # 其他配置参数
+        self.kwargs = kwargs
 
         # 加载模型
         logger.info("正在加载批量识别模型...")
-        logger.info(f"  ASR模型: {asr_model_path}")
-        logger.info(f"  VAD模型: {vad_model_path}")
+        logger.info(f"  模型: {model}")
+        logger.info(f"  VAD: {vad_model}")
+        if punc_model:
+            logger.info(f"  标点: {punc_model}")
+        if spk_model:
+            logger.info(f"  说话人: {spk_model}")
         logger.info(f"  设备: {device}")
+        logger.info(f"  Batch: {batch_size_s}s")
 
         try:
-            # 参考FunASR文档的AutoModel初始化方式
-            self.model = funasr.AutoModel(
-                model=asr_model_path,
-                vad_model=vad_model_path,
-                vad_kwargs=self.vad_kwargs,
-                device=device,
-                ncpu=ncpu if device == "cpu" else None,
-                disable_update=True,  # 禁用版本检查
-            )
-            logger.info("✓ 批量识别模型加载成功")
+            # 构建模型参数 (参考魔搭官网最佳实践)
+            model_kwargs = {
+                "model": model,
+                "vad_model": vad_model,
+                "vad_kwargs": self.vad_kwargs,
+                "device": device,
+                "model_hub": model_hub,
+                "disable_update": True,
+            }
+
+            if device == "cpu":
+                model_kwargs["ncpu"] = ncpu
+            if punc_model:
+                model_kwargs["punc_model"] = punc_model
+            if spk_model:
+                model_kwargs["spk_model"] = spk_model
+
+            # 加载模型
+            self.asr_model = funasr.AutoModel(**model_kwargs)
+            logger.info("✓ 模型加载成功")
         except Exception as e:
             logger.error(f"✗ 模型加载失败: {e}")
             raise
@@ -110,7 +147,12 @@ class BatchTranscriber:
             识别结果字典:
             - status: "success" 或 "error"
             - text: 完整识别文本
-            - segments: 分段识别结果列表(含时间戳)
+            - results: FunASR原始结果列表,每个元素包含:
+                - text: 识别文本
+                - punc_text: 带标点的文本
+                - timestamp: 时间戳 [[start, end], ...]
+                - spk: 说话人ID (如启用说话人模型)
+                - emotion: 情感标签 (如启用情感模型)
             - audio_path: 音频文件路径
             - audio_info: 音频文件信息
         """
@@ -120,7 +162,7 @@ class BatchTranscriber:
                 "status": "error",
                 "message": f"音频文件不存在: {audio_path}",
                 "text": "",
-                "segments": [],
+                "results": [],
             }
 
         try:
@@ -128,15 +170,31 @@ class BatchTranscriber:
             audio_info = sf.info(audio_path)
             logger.info(f"处理音频: {audio_path} ({audio_info.duration:.2f}秒)")
 
-            # 合并参数 (kwargs优先级更高)
-            generate_kwargs = self.asr_kwargs.copy()
-            generate_kwargs["language"] = language
-            generate_kwargs["cache"] = {}  # 批量识别使用空cache
+            # 构建参数
+            generate_kwargs = {
+                "language": language,
+                "batch_size_s": self.batch_size_s,
+                "use_itn": True,
+                "merge_vad": True,
+                "merge_length_s": 15,
+            }
+
+            # 添加热词支持 (参考魔搭官网: hotword='魔搭')
+            if self.hotword:
+                generate_kwargs["hotword"] = self.hotword
+            if "hotword" in kwargs:
+                generate_kwargs["hotword"] = kwargs.pop("hotword")
+
             generate_kwargs.update(kwargs)
 
-            # 执行识别 (参考FunASR文档的标准调用方式)
-            logger.info(f"开始识别,参数: {generate_kwargs}")
-            result = self.model.generate(input=audio_path, **generate_kwargs)
+            # 执行识别
+            if "hotword" in generate_kwargs:
+                logger.info(
+                    f"开始识别: {audio_path} (热词: {generate_kwargs['hotword']})"
+                )
+            else:
+                logger.info(f"开始识别: {audio_path}")
+            result = self.asr_model.generate(input=audio_path, **generate_kwargs)
 
             # 格式化结果
             formatted_result = self._format_result(result)
@@ -162,7 +220,7 @@ class BatchTranscriber:
                 "status": "error",
                 "message": str(e),
                 "text": "",
-                "segments": [],
+                "results": [],
                 "audio_path": audio_path,
             }
 
@@ -182,11 +240,11 @@ class BatchTranscriber:
         result = self.transcribe(audio_path, **kwargs)
 
         if result["status"] == "success" and return_vad_segments:
-            # VAD分段信息通常在segments中的timestamp字段
+            # VAD分段信息通常在results中的timestamp字段
             vad_segments = []
-            for segment in result.get("segments", []):
-                if "timestamp" in segment:
-                    vad_segments.append(segment["timestamp"])
+            for item in result.get("results", []):
+                if isinstance(item, dict) and "timestamp" in item:
+                    vad_segments.append(item["timestamp"])
 
             result["vad_segments"] = vad_segments
 
@@ -195,57 +253,42 @@ class BatchTranscriber:
     def _format_result(self, result: Any) -> Dict[str, Any]:
         """格式化识别结果
 
-        参考FunASR返回格式,支持多种结果类型:
-        - SenseVoice: 返回带language, emotion, event等信息
-        - Paraformer: 返回带timestamp的分段结果
+        按照FunASR官方推荐格式返回原始结果，保持完整信息不做额外转换
+
+        FunASR官方返回格式说明:
+        - 列表格式: 每个元素是一个句子的识别结果字典
+        - 字典包含: text(识别文本), timestamp(时间戳), 以及其他模型特有字段
+        - 支持的额外字段: punc_text(标点文本), spk(说话人), emotion(情感)等
 
         参数:
             result: FunASR generate方法返回的原始结果
 
         返回:
-            统一格式的结果字典
+            包含text和结果列表的字典
         """
-        formatted = {"text": "", "segments": []}
-
-        # 处理列表类型结果 (最常见)
+        # 按照官方推荐，直接使用FunASR原始返回格式
         if isinstance(result, list):
-            full_text_parts = []
+            # 提取完整文本用于快速访问
+            text_parts = []
             for item in result:
                 if isinstance(item, dict):
-                    text = item.get("text", "")
-                    full_text_parts.append(text)
-
-                    # 构建分段信息
-                    segment_info = {"text": text}
-
-                    # 添加时间戳 (Paraformer格式: [[start, end], ...])
-                    if "timestamp" in item:
-                        segment_info["timestamp"] = item["timestamp"]
-
-                    # 添加SenseVoice特有信息
-                    for key in ["language", "emotion", "event"]:
-                        if key in item:
-                            segment_info[key] = item[key]
-
-                    formatted["segments"].append(segment_info)
+                    # 优先使用punc_text（带标点），否则使用text
+                    text_parts.append(item.get("punc_text") or item.get("text", ""))
                 elif isinstance(item, str):
-                    # 简单文本结果
-                    full_text_parts.append(item)
-                    formatted["segments"].append({"text": item})
+                    text_parts.append(item)
 
-            formatted["text"] = "".join(full_text_parts)
+            return {"text": "".join(text_parts), "results": result}  # 官方推荐字段名
 
-        # 处理字典类型结果
         elif isinstance(result, dict):
-            formatted["text"] = result.get("text", "")
-            formatted["segments"] = [result]
+            # 单个结果
+            text = result.get("punc_text") or result.get("text", "")
+            return {"text": text, "results": [result]}
 
-        # 处理字符串类型结果
         elif isinstance(result, str):
-            formatted["text"] = result
-            formatted["segments"] = [{"text": result}]
+            # 纯文本结果
+            return {"text": result, "results": [{"text": result}]}
 
-        return formatted
+        return {"text": "", "results": []}
 
     def validate_audio(self, audio_path: str) -> Dict[str, Any]:
         """验证音频文件

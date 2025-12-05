@@ -1,8 +1,14 @@
-"""FunASR MCP服务器主程序
+"""FunASR MCP服务器主程序 v0.3.0
 
-基于FastMCP框架提供语音识别服务,包括:
-- 实时流式语音识别 (结合VAD+ASR)
-- 批量语音识别 (结合VAD分段+批量ASR)
+基于FastMCP框架提供专业的中文语音识别服务,包括:
+- 实时流式语音识别 (Paraformer-Streaming, 仅支持ASR)
+- 批量语音识别 (Paraformer-large + VAD分段 + 标点恢复 + 说话人分离)
+- 热词定制支持 (提高特定词汇识别准确率)
+- 多客户端并发支持 (线程锁保护模型推理)
+- 连接状态监控和会话管理
+
+版本: 0.3.0
+更新日期: 2025-12-05
 """
 
 import os
@@ -18,6 +24,7 @@ os.environ["MODELSCOPE_CACHE"] = "./Model"
 
 import soundfile as sf
 import numpy as np
+from scipy import signal as sp_signal
 from fastmcp import FastMCP
 from core.realtime_transcriber import RealtimeTranscriber
 from core.batch_transcriber import BatchTranscriber
@@ -42,40 +49,34 @@ connection_lock = threading.Lock()
 
 # ========== 实例化处理器 ==========
 
-# 实时语音识别器配置 (参考FunASR流式识别最佳实践)
-# 使用 paraformer-zh-streaming: FunASR官方流式识别模型
-# ModelScope: iic/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8404-online
-# 支持真正的流式识别,延迟可控,适合实时场景
-# 首次运行会自动从ModelScope下载到 ./Model/ 目录
+# 实时语音识别器配置 (参考魔搭官网最佳实践)
+# 模型: paraformer-zh-streaming (内置VAD)
+# 参考: https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online
+# 注意: 流式模型内置VAD并仅支持实时ASR,不支持标点和说话人识别
 realtime_transcriber = RealtimeTranscriber(
-    asr_model_path="paraformer-zh-streaming",  # 官方流式模型简称,自动下载
-    vad_model_path=None,  # 流式模型内置VAD,无需单独指定
-    device="cpu",  # 生产环境改为 "cuda:0" 启用GPU
+    model="paraformer-zh-streaming",
+    device="cpu",
     ncpu=4,
-    chunk_size=[0, 10, 5],  # 600ms延迟配置 (可选: [0,8,4]为480ms)
-    encoder_chunk_look_back=4,  # 编码器回溯块数
-    decoder_chunk_look_back=1,  # 解码器回溯块数
-    vad_kwargs={},
-    asr_kwargs={},
+    chunk_size=[0, 10, 5],  # 600ms延迟(官方推荐配置)
+    encoder_chunk_look_back=4,
+    decoder_chunk_look_back=1,
+    model_hub="ms",
 )
 
-# 批量语音识别器配置 (参考FunASR批处理最佳实践)
-# 使用 paraformer-zh: FunASR官方批量识别模型
-# ModelScope: damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch
-# 支持VAD分段、标点恢复、时间戳输出等功能
-# 首次运行会自动从ModelScope下载到 ./Model/ 目录
+# 批量语音识别器配置 (参考魔搭官网最佳实践)
+# 模型: paraformer-zh
+# 参考: https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
 batch_transcriber = BatchTranscriber(
-    asr_model_path="paraformer-zh",  # 官方批量识别模型简称,自动下载
-    vad_model_path="fsmn-vad",  # 官方VAD模型简称,自动下载
-    device="cpu",  # 生产环境改为 "cuda:0" 启用GPU
-    ncpu=4,  # CPU线程数,生产环境可增加至8
-    vad_kwargs={"max_single_segment_time": 30000},  # VAD最大分段时长(ms)
-    asr_kwargs={
-        "batch_size_s": 60,  # 动态批处理:每批总时长(秒)
-        "use_itn": True,  # 启用逆文本归一化
-        "merge_vad": True,  # 合并短VAD片段
-        "merge_length_s": 15,  # VAD片段合并长度(秒)
-    },
+    model="paraformer-zh",
+    vad_model="fsmn-vad",
+    punc_model="ct-punc-c",  # 标点恢复(可选): "ct-punc-c"
+    spk_model="cam++",  # 说话人(可选): "cam++"
+    device="cpu",
+    ncpu=4,
+    vad_kwargs={"max_single_segment_time": 30000},
+    batch_size_s=300,  # ModelScope推荐值(官方最佳实践)
+    model_hub="ms",  # ModelScope模型仓库
+    hotword="魔搭",  # 热词定制: 提高"魔搭"等特定词汇识别准确率
 )
 
 # ========== 注册MCP工具 ==========
@@ -84,9 +85,13 @@ batch_transcriber = BatchTranscriber(
 # ---------- 批量语音识别工具 ----------
 @mcp.tool(
     name="transcribe_audio",
-    description="对音频文件进行批量语音识别，使用VAD分段后进行批量识别",
+    description="对音频文件进行批量语音识别，使用VAD分段后进行批量识别，支持热词定制",
 )
-def transcribe_audio(audio_path: str, return_vad_segments: bool = False) -> dict:
+def transcribe_audio(
+    audio_path: str,
+    return_vad_segments: bool = False,
+    hotword: str = None,
+) -> dict:
     """批量语音识别
 
     使用VAD进行语音分段，然后对所有语音段进行批量识别。
@@ -95,24 +100,29 @@ def transcribe_audio(audio_path: str, return_vad_segments: bool = False) -> dict
     参数:
         audio_path: 音频文件路径
         return_vad_segments: 是否返回VAD分段的时间戳信息
+        hotword: 热词，用于提高特定词汇的识别准确率 (例: "魔搭")
 
     返回:
         包含识别结果的字典:
         - status: "success" 或 "error"
         - text: 完整识别文本
-        - segments: 分段识别结果列表
+        - results: FunASR原始结果列表
         - audio_path: 音频文件路径
         - audio_info: 音频文件信息
         - vad_segments: VAD分段信息(如果return_vad_segments=True)
     """
     # 使用锁保护模型推理 (支持并发调用)
     with batch_model_lock:
+        kwargs = {}
+        if hotword:
+            kwargs["hotword"] = hotword
+
         if return_vad_segments:
             return batch_transcriber.transcribe_with_vad_segments(
-                audio_path=audio_path, return_vad_segments=True
+                audio_path=audio_path, return_vad_segments=True, **kwargs
             )
         else:
-            return batch_transcriber.transcribe(audio_path=audio_path)
+            return batch_transcriber.transcribe(audio_path=audio_path, **kwargs)
 
 
 @mcp.tool(
@@ -197,11 +207,13 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
     """WebSocket端点：实时接收音频流并进行识别
 
     使用paraformer-zh-streaming进行流式识别:
+    - 模型内置VAD，自动检测语音活动
     - chunk_size配置为[0,10,5]，即600ms实时粒度
     - 每次输入600ms音频(9600 samples @ 16kHz)
     - 通过cache维护流式状态
     - 支持多客户端并发（使用线程锁保护模型推理）
     - 添加超时保护和资源管理
+    - 带通滤波器预处理（300-3400Hz），无需额外能量检查
     """
     await websocket.accept()
 
@@ -243,6 +255,23 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
         audio_buffer = np.zeros(max_buffer_size, dtype=np.float32)
         buffer_write_index = 0
         buffer_bytes = b""
+
+        # 音频滤波器（带通滤波器：保留语音频段 300Hz-3400Hz）
+        use_filter = True
+        if use_filter:
+            nyquist = 8000  # 16kHz / 2
+            low_cutoff = 300  # 低频截止 300Hz
+            high_cutoff = 3400  # 高频截止 3400Hz（语音主要频段）
+            sos = sp_signal.butter(
+                4,
+                [low_cutoff / nyquist, high_cutoff / nyquist],
+                btype="band",
+                output="sos",
+            )
+            zi = sp_signal.sosfilt_zi(sos) * 0
+            print(
+                f"[{session_id}] 已启用音频滤波器: 带通滤波 {low_cutoff}-{high_cutoff}Hz"
+            )
 
         while True:
             # 接收消息
@@ -401,6 +430,12 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                             ]
                         buffer_write_index = remaining
 
+                        # 应用带通滤波器（保留语音频段）
+                        # 滤波器已能有效过滤噪音，无需额外能量检查
+                        if use_filter:
+                            filtered, zi = sp_signal.sosfilt(sos, chunk, zi=zi)
+                            chunk = filtered
+
                         print(
                             f"[{session_id}] 处理音频块 {chunk_count + 1}: {len(chunk)} 样本 ({CHUNK_SIZE_MS}ms)"
                         )
@@ -438,19 +473,41 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                                 active_connections[session_id][
                                     "chunk_count"
                                 ] = chunk_count
-                                print(
-                                    f"[{session_id}] ✓ 识别文本[{chunk_count}]: {result['text']}"
-                                )
-                                await websocket.send_json(
-                                    {
-                                        "type": "result",
-                                        "text": result["text"],
-                                        "is_final": False,
-                                        "chunk_number": chunk_count,
-                                        "timestamp": result.get("timestamp"),
-                                        "session_id": session_id,
-                                    }
-                                )
+                                text = result["text"]
+
+                                # 构建日志信息
+                                log_parts = [
+                                    f"[{session_id}] ✓ 识别文本[{chunk_count}]: {text}"
+                                ]
+                                if result.get("speaker_id"):
+                                    log_parts.append(f"[说话人:{result['speaker_id']}]")
+                                if result.get("emotion"):
+                                    log_parts.append(f"[情感:{result['emotion']}]")
+                                print(" ".join(log_parts))
+
+                                # 发送完整识别结果（包含说话人和情感信息）
+                                response = {
+                                    "type": "result",
+                                    "text": text,
+                                    "is_final": True,  # 标记为最终结果，客户端会输入
+                                    "chunk_number": chunk_count,
+                                    "timestamp": result.get("timestamp"),
+                                    "session_id": session_id,
+                                }
+
+                                # 添加说话人信息（如果有）
+                                if result.get("speaker_id") is not None:
+                                    response["speaker_id"] = result["speaker_id"]
+
+                                # 添加情感信息（如果有）
+                                if result.get("emotion") is not None:
+                                    response["emotion"] = result["emotion"]
+
+                                # 添加VAD信息（如果有）
+                                if result.get("is_speech") is not None:
+                                    response["is_speech"] = result["is_speech"]
+
+                                await websocket.send_json(response)
                             else:
                                 pass  # print(f"[{session_id}] 识别结果为空(可能是静音段)")
 
@@ -562,14 +619,20 @@ if __name__ == "__main__":
     print("正在启动FunASR MCP服务器 v0.3.0 (并发优化版)...")
     print(f"服务器地址: http://0.0.0.0:8000")
     print(f"MCP端点: http://0.0.0.0:8000/mcp")
-    print("\n使用的模型:")
-    print(f"  - 批量识别: {batch_transcriber.asr_model_path}")
-    print(f"  - 流式识别: {realtime_transcriber.asr_model_path} (600ms延迟)")
-    print(f"  - VAD模型: {batch_transcriber.vad_model_path}")
-    print(f"  - 运行设备: {batch_transcriber.device}")
+    print("\n已加载模型:")
+    print(f"  ASR批量: {batch_transcriber.model}")
+    print(
+        f"  ASR流式: {realtime_transcriber.model} ({realtime_transcriber.chunk_size[1]*60}ms延迟)"
+    )
+    print(f"  VAD: {batch_transcriber.vad_model}")
+    print(f"  标点: {batch_transcriber.punc_model or '未启用'}")
+    print(f"  说话人: {batch_transcriber.spk_model or '未启用'}")
+    print(f"  设备: {batch_transcriber.device.upper()}")
     print("\n可用功能:")
     print("  ✓ 批量语音识别 (VAD分段+批量ASR，适合音频文件)")
     print("  ✓ 实时语音识别 (WebSocket流式识别，Paraformer-Streaming)")
+    print("  ✓ 标点符号恢复 (自动添加标点符号)")
+    print("  ✓ 说话人分离 (识别不同说话人)")
     print("  ✓ 多客户端并发支持 (线程锁保护模型推理)")
     print("  ✓ 音频文件验证")
     print("  ✓ 浏览器录音上传识别")

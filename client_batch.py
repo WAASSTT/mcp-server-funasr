@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""FunASR 批量语音识别客户端
+"""FunASR 批量语音识别客户端 v0.3.0
 
-使用 HTTP 调用进行批量语音识别（非流式）
-适合处理音频文件
+使用 HTTP/MCP 协议调用进行批量语音识别（非流式）
+适合处理音频文件，支持 VAD 分段、标点恢复、说话人分离和热词定制
+
+功能:
+- 健康检查: 验证服务器状态
+- 工具列表: 查看可用的 MCP 工具
+- 音频验证: 检查音频文件格式和属性
+- 批量识别: 使用 Paraformer 进行高精度识别
+- 热词支持: 提高特定词汇识别准确率
+
+版本: 0.3.0
+更新日期: 2025-12-05
 """
 
 import sys
@@ -19,9 +29,36 @@ class FunASRClient:
         self.base_url = base_url
         self.mcp_url = f"{base_url}/mcp"
         self.session = requests.Session()
+        self.session_id = None
         self.session.headers.update(
-            {"Content-Type": "application/json", "Accept": "application/json"}
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
         )
+        self._initialize_session()
+
+    def _initialize_session(self):
+        """初始化 MCP 会话"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "funasr-client", "version": "0.3.0"},
+            },
+        }
+
+        response = self.session.post(self.mcp_url, json=payload)
+        response.raise_for_status()
+
+        # 获取 session ID
+        session_id = response.headers.get("mcp-session-id")
+        if session_id:
+            self.session_id = session_id
+            self.session.headers.update({"mcp-session-id": session_id})
 
     def check_health(self) -> Dict[str, Any]:
         """检查服务器健康状态"""
@@ -34,16 +71,35 @@ class FunASRClient:
 
     def list_tools(self) -> Dict[str, Any]:
         """列出可用的 MCP 工具"""
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        }
 
-        response = self.session.post(self.mcp_url, json=payload)
+        response = self.session.post(self.mcp_url, json=payload, stream=True)
         response.raise_for_status()
-        result = response.json()
+
+        # 解析 SSE 流
+        result = self._parse_sse_response(response)
 
         if "error" in result:
             raise RuntimeError(f"MCP 错误: {result['error']}")
 
         return result.get("result", {})
+
+    def _parse_sse_response(self, response) -> Dict[str, Any]:
+        """解析 Server-Sent Events 响应"""
+        for line in response.iter_lines():
+            if line:
+                line = line.decode("utf-8")
+                if line.startswith("data: "):
+                    data = line[6:]  # 移除 'data: ' 前缀
+                    try:
+                        return json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+        return {}
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """调用 MCP 工具"""
@@ -54,9 +110,13 @@ class FunASRClient:
             "params": {"name": tool_name, "arguments": arguments},
         }
 
-        response = self.session.post(self.mcp_url, json=payload, timeout=300)
+        response = self.session.post(
+            self.mcp_url, json=payload, timeout=300, stream=True
+        )
         response.raise_for_status()
-        result = response.json()
+
+        # 解析 SSE 流
+        result = self._parse_sse_response(response)
 
         if "error" in result:
             raise RuntimeError(f"工具调用失败: {result['error']}")

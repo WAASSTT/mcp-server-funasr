@@ -24,7 +24,7 @@ if [ ! -d "Model" ]; then
 fi
 
 echo "✅ 环境检查完成"
-echo "💡 提示: 首次运行会自动从ModelScope下载模型(约1.1GB)"
+echo "💡 提示: 首次运行会自动从ModelScope下载模型"
 echo ""
 echo "🌐 启动服务器..."
 echo "   MCP 服务器: http://localhost:8000"
