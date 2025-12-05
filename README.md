@@ -1,34 +1,57 @@
-# FunASR MCP 服务器
+# 🎙️ FunASR MCP 服务器
 
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![FunASR](https://img.shields.io/badge/FunASR-1.2.0%2B-green.svg)](https://github.com/modelscope/FunASR)
 [![FastMCP](https://img.shields.io/badge/FastMCP-2.5.1%2B-orange.svg)](https://github.com/jlowin/fastmcp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-基于 [FunASR](https://github.com/modelscope/FunASR) 的模型上下文协议(MCP)服务器，提供专业的中文语音识别服务。
+> 专业的中文语音识别MCP服务器，支持实时流式识别、语音增强和LLM后处理
 
-## ✨ 核心特性
+**快速导航**: [快速开始](#-快速开始) • [功能特性](#-功能特性) • [使用指南](#-使用指南) • [API文档](#-api-端点)
 
-### 识别功能
+---
 
-- 🎯 **批量语音识别** - Paraformer-large 模型，高精度离线识别
-- 🚀 **实时流式识别** - WebSocket 流式输入，延迟低至 600ms
-- 📝 **标点符号恢复** - CT-Transformer 自动添加标点
-- 👥 **说话人分离** - CAM++ 模型识别不同说话人
-- 🔤 **热词定制** - 提高特定词汇识别准确率
+## 📖 简介
 
-### 音频处理
+基于阿里达摩院 [FunASR](https://github.com/modelscope/FunASR) 和 [FastMCP](https://github.com/jlowin/fastmcp) 框架构建的语音识别服务器，提供企业级中文语音识别能力。
 
-- 🎚️ **专业滤波器** - 双层 Butterworth 滤波，信号级噪音抑制
-- 🎯 **模型内置 VAD** - Paraformer-Streaming 自带语音活动检测
-- 🔊 **音质提升 30%** - 语音频段提取，过滤环境噪音
+### 🎯 核心优势
 
-### 系统能力
+- 🏆 **高精度识别** - 采用Paraformer系列模型，业界领先准确率
+- ⚡ **低延迟流式** - 600ms实时响应，支持对话式交互
+- 🔇 **专业降噪** - ClearerVoice-Studio深度语音增强
+- 🤖 **AI后处理** - Qwen2.5-7B蒸馏模型智能优化识别文本
+- 🔒 **本地部署** - 完全离线运行，数据隐私安全
+- 🌐 **标准协议** - 完整实现MCP规范，易于集成
 
-- 🌐 **浏览器支持** - 直接上传录音文件识别
-- 🔄 **高并发处理** - 线程安全，支持多客户端同时使用
-- 🛠️ **MCP 协议兼容** - 完整实现 Model Context Protocol 规范
-- 📊 **实时监控** - 查看活跃连接和会话状态
+## ✨ 功能特性
+
+### 🎯 识别能力
+
+| 功能 | 说明 | 技术 |
+|------|------|------|
+| **批量识别** | 高精度离线识别 | Paraformer-large |
+| **流式识别** | 600ms低延迟实时响应 | Paraformer-Streaming |
+| **标点恢复** | 自动添加标点符号 | CT-Transformer |
+| **说话人分离** | 识别不同说话人 | CAM++ |
+| **热词定制** | 提升特定词汇准确率 | 自定义词表 |
+
+### 🔊 音频处理
+
+| 功能 | 说明 | 技术 |
+|------|------|------|
+| **语音增强** | 专业级降噪处理 | ClearerVoice-Studio |
+| **噪声抑制** | 多场景降噪（空调/键盘/环境噪音） | DNS-Challenge |
+| **VAD检测** | 智能语音活动检测 | 模型内置 |
+| **LLM优化** | 智能文本后处理 | Qwen2.5-7B |
+
+### 🛠️ 系统能力
+
+- ✅ **浏览器支持** - 直接上传录音文件识别
+- ✅ **高并发** - 线程安全，多客户端并发
+- ✅ **MCP协议** - 完整实现标准规范
+- ✅ **实时监控** - 连接状态和性能监控
+- ✅ **本地部署** - 无需API，数据安全
 
 ## 📋 系统要求
 
@@ -40,28 +63,31 @@
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 步骤1: 环境准备
 
 ```bash
-# 一键安装脚本
+# 克隆项目
+git clone https://github.com/WAASSTT/mcp-server-funasr.git
+cd mcp-server-funasr
+
+# 安装依赖
 chmod +x setup.sh
 ./setup.sh
-
-# 或手动安装
-pip install -e ".[all]"
 ```
 
-### 2. 启动服务器
+### 步骤2: 启动服务
 
 ```bash
-# 开发环境
+# 基础启动（默认启用增强和LLM）
 python main.py
 
 # 生产环境（多进程）
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-### 3. 验证服务
+服务启动后会自动下载所需模型到 `./Model` 目录。
+
+### 步骤3: 验证服务
 
 ```bash
 # 健康检查
@@ -71,29 +97,31 @@ curl http://localhost:8000/health
 curl http://localhost:8000/connections
 ```
 
-## 📚 使用方式
+**提示**: 首次启动需要下载约3GB模型文件，请耐心等待。
 
-### 方式一: 批量识别
+## 📚 使用指南
+
+### 方式1: Python客户端 - 批量识别
 
 ```bash
-# 识别音频文件
+# 基础识别
 python client_batch.py transcribe audio/test.wav
 
-# 带 VAD 分段
+# VAD分段识别
 python client_batch.py transcribe audio/test.wav --vad
 ```
 
-### 方式二: 实时流式识别
+### 方式2: Python客户端 - 实时识别
 
 ```bash
-# 显示模式
+# 显示模式（终端显示）
 python client_realtime.py
 
-# 输入法模式（将识别结果直接输入到应用）
+# 输入法模式（自动输入文本）
 python client_realtime.py --input-mode --show-status
 ```
 
-### 方式三: WebSocket API
+### 方式3: WebSocket API
 
 ```javascript
 const ws = new WebSocket('ws://localhost:8000/ws/realtime');
@@ -109,107 +137,109 @@ ws.onmessage = (event) => {
 };
 ```
 
-## 🎯 音频处理架构
+## 🎯 技术架构
 
-### 📊 处理流程
+### 处理流程
 
+```mermaid
+graph LR
+    A[音频输入<br/>16kHz PCM] --> B[语音增强<br/>ClearerVoice]
+    B --> C[语音识别<br/>Paraformer]
+    C --> D[LLM后处理<br/>Qwen3]
+    D --> E[识别结果<br/>优化文本]
 ```
-麦克风音频 → 客户端滤波 → 服务器滤波 → 模型处理 → 识别结果
-   16kHz      高通 >300Hz    带通 300-3400Hz  内置VAD
-```
 
-### 1️⃣ 客户端：高通滤波
+### 核心技术栈
 
-**去除低频噪音**
+#### 1. 语音增强 - ClearerVoice-Studio
 
-- 截止频率：300Hz
-- 滤波器：4 阶 Butterworth 高通滤波器
-- 目标：过滤空调、风扇、电流声等低频环境噪音
+**技术**: DNS-Challenge (Deep Noise Suppression)
+**模型**: iic/ClearerVoice-Studio
+**功能**: 深度降噪、去混响、语音清晰度提升
 
-**效果**
+- 🔇 专业级多场景降噪（空调、键盘、环境噪音）
+- ⚡ 实时处理，延迟可控
+- 🎯 显著提升识别准确率
 
-- 🔇 彻底消除低频环境噪音
-- ⚡ 减少约 70% 的无效数据传输
-- 💰 节省带宽和服务器资源
+#### 2. 语音识别 - Paraformer系列
 
-### 2️⃣ 服务器：带通滤波
+**模型**: Paraformer-large / Paraformer-Streaming
+**特性**: 内置VAD、高精度、低延迟
 
-**语音频段提取**
+- 🎯 模型级智能VAD，零额外延迟
+- 📝 自动标点恢复（CT-Transformer）
+- 👥 说话人分离（CAM++）
+- ⚡ 600ms实时响应
 
-- 频率范围：300-3400Hz（电话音质标准）
-- 滤波器：4 阶 Butterworth 带通滤波器
-- 目标：仅保留人声频段
+#### 3. LLM后处理 - Qwen2.5-7B
 
-**效果**
+**模型**: Qwen2.5-7B-Instruct (蒸馏版)
+**功能**: 智能文本优化
+**特点**: 轻量级、快速推理、低资源占用
 
-- 🎛️ 专业语音频段提取
-- 🔊 信号质量提升约 30%
-- ⚡ 处理延迟 < 1ms
+- ✨ 口语转书面语
+- 📝 优化标点和分段
+- 🎯 修正语法错误
+- 💡 保持原意不失真
 
-### 3️⃣ 模型：内置 VAD
+### 技术优势
 
-**智能语音检测**
+| 特性 | 传统方案 | 本方案 |
+|------|---------|--------|
+| 降噪方案 | 简单滤波器 | ✅ DNS-Challenge深度学习 |
+| VAD检测 | 独立模块 | ✅ 模型内置，零延迟 |
+| 文本优化 | 规则后处理 | ✅ LLM智能优化 |
+| 部署方式 | 依赖API | ✅ 完全本地化 |
+| 数据安全 | 云端传输 | ✅ 本地处理 |
 
-- Paraformer-Streaming 模型自带 VAD 功能
-- 模型内部自动识别和处理语音段
-- 无需额外配置
+## ⚙️ 配置说明
 
-**效果**
+所有配置在 `main.py` 的 `Config` 类中集中管理：
 
-- 🎯 模型级精确语音检测
-- ⚡ 零额外延迟（集成在推理中）
-- ✨ 官方优化，质量保障
-
-### 📈 性能对比
-
-| 指标 | 无滤波器 | 单层滤波 | 双层滤波 + 内置 VAD |
-|------|---------|---------|-------------------|
-| 低频噪音抑制 | ❌ 无效 | ⚠️ 一般 | ✅ 完全过滤 |
-| 高频噪音抑制 | ❌ 无效 | ⚠️ 一般 | ✅ 完全过滤 |
-| 语音识别质量 | 一般 | 较好 | ✅ 优秀（+30%） |
-| 网络流量占用 | 100% | ~40% | ✅ ~10% |
-| 处理延迟 | 基准 | +0.5ms | ✅ +1ms |
-| 误触发率 | 高 | 中 | ✅ 极低 |
-
-### 🎨 技术亮点
-
-- ✅ **零冗余** - 无重复检测，简洁高效
-- ✅ **信号级处理** - 从源头保证音质
-- ✅ **专业标准** - 300-3400Hz 电信语音传输标准
-- ✅ **模型协同** - 充分利用内置 VAD
-- ✅ **数值稳定** - SOS 格式滤波器
-
-## 🔧 配置说明
-
-### 模型配置
-
-编辑 `main.py`:
+### 服务器配置
 
 ```python
-# 批量识别
-batch_transcriber = BatchTranscriber(
-    model="paraformer-zh",
-    vad_model="fsmn-vad",
-    punc_model="ct-punc-c",
-    device="cpu",  # 或 "cuda:0"
-    hotword="魔搭",
-)
-
-# 实时识别
-realtime_transcriber = RealtimeTranscriber(
-    model="paraformer-zh-streaming",
-    chunk_size=[0, 10, 5],  # 600ms 延迟
-    device="cpu",
-)
+class Config:
+    SERVER_HOST = "0.0.0.0"          # 监听地址
+    SERVER_PORT = 8000               # 监听端口
+    TIMEOUT_KEEP_ALIVE = 75          # 连接保持超时
 ```
 
-### 延迟配置
+### 识别配置
+
+```python
+    # 实时识别
+    REALTIME_MODEL = "paraformer-zh-streaming"
+    REALTIME_CHUNK_SIZE = [0, 10, 5]  # 600ms延迟
+    REALTIME_DEVICE = "cpu"           # 或 "cuda"
+
+    # 批量识别
+    BATCH_MODEL = "paraformer-zh"
+    BATCH_VAD_MODEL = "fsmn-vad"
+    BATCH_PUNC_MODEL = "ct-punc-c"
+    BATCH_SPK_MODEL = "cam++"
+    BATCH_DEVICE = "cpu"
+    BATCH_HOTWORD = "魔搭"            # 热词定制
+```
+
+### 延迟优化
+
+通过 `REALTIME_CHUNK_SIZE` 调整延迟：
 
 | chunk_size | 延迟 | 适用场景 |
-|-----------|------|---------|
+|-----------|------|----------|
 | [0, 5, 5] | 300ms | 对话式交互 |
-| [0, 8, 4] | 480ms | 一般实时场景 |
-| [0, 10, 5] | 600ms | 默认配置(推荐) |
+| [0, 8, 4] | 480ms | 一般场景 |
+| [0, 10, 5] | 600ms | 默认推荐 |
+
+### 功能开关
+
+```python
+    ENABLE_AUDIO_ENHANCEMENT = True   # 语音增强
+    ENABLE_LLM_POSTPROCESS = True     # LLM后处理
+    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 蒸馏模型
+    LLM_DEVICE = "cuda"               # LLM设备（可选cpu）
+```
 
 ## 📊 API 端点
 
@@ -304,52 +334,59 @@ curl http://localhost:8000/connections
 
 ## 📝 更新日志
 
-### v0.3.0 (2025-12-05)
+### v0.5.0 (2025-12-05) - AI增强版
 
-**核心功能**
+#### 核心功能
 
-- ✨ 标点符号恢复 (CT-Transformer)
-- ✨ 说话人分离 (CAM++)
-- ✨ 热词定制功能
-- ✨ 连接监控端点
-- ✨ 统一实时客户端（显示/输入法模式）
+- ✨ 深度语音增强 (ClearerVoice-Studio DNS-Challenge)
+- ✨ LLM后处理优化 (本地Qwen3-235B)
+- ✨ 代码重构 (Config类集中管理)
+- 🎯 专业级降噪处理
+- 🎯 模型内置VAD（零额外延迟）
 
-**音频处理架构**
+#### 系统改进
 
-- 🎚️ 双层滤波器设计（高通 + 带通）
-- 🎯 模型内置 VAD（零额外延迟）
-- ⚡ 架构优化（移除冗余检测）
-- 🔊 音质提升 30%
-
-**系统改进**
-
-- 🔧 WebSocket 缓冲区优化
+- 🔧 完全本地化部署，移除OpenAI依赖
+- 🔧 简化依赖，清理不必要的包
 - 🔧 并发安全保护
-- 📊 会话统计功能
-- 🐛 修复内存泄漏
-- 🐛 修复噪音误触发
+- 📊 实时监控和统计
 
-## 🤝 贡献
+### v0.3.0 (2025-12-04)
 
-欢迎提交 Issue 和 Pull Request！
+- ✨ 统一实时客户端（显示/输入法模式）
+- 🐛 修复内存泄漏和噪音误触发
+
+## 🤝 贡献指南
+
+欢迎提交 Issue 和 Pull Request！请遵循以下规范：
+
+- 提交前运行测试
+- 遵循代码风格
+- 更新相关文档
 
 ## 📄 许可证
 
-MIT License - 详见 [LICENSE](LICENSE)
+本项目采用 MIT License - 详见 [LICENSE](LICENSE)
 
 ## 🙏 致谢
 
-- [FunASR](https://github.com/modelscope/FunASR) - 阿里达摩院语音实验室
-- [FastMCP](https://github.com/jlowin/fastmcp) - MCP 框架
-- [ModelScope](https://www.modelscope.cn/) - 模型平台
+- [FunASR](https://github.com/modelscope/FunASR) - 阿里达摩院语音实验室提供的强大ASR框架
+- [FastMCP](https://github.com/jlowin/fastmcp) - 优秀的MCP协议框架
+- [ModelScope](https://www.modelscope.cn/) - 提供模型托管和下载服务
+- [ClearerVoice-Studio](https://www.modelscope.cn/models/iic/ClearerVoice-Studio) - 专业语音增强模型
+- [Qwen2.5](https://www.modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct) - 智能文本后处理支持
 
 ## 🔗 相关链接
 
-- [FunASR 文档](https://github.com/modelscope/FunASR/blob/main/docs/tutorial/README_zh.md)
-- [MCP 规范](https://modelcontextprotocol.io/)
-- [ModelScope 模型库](https://www.modelscope.cn/models)
+- **项目文档**: [GitHub Repository](https://github.com/WAASSTT/mcp-server-funasr)
+- **FunASR文档**: [官方教程](https://github.com/modelscope/FunASR/blob/main/docs/tutorial/README_zh.md)
+- **MCP规范**: [Model Context Protocol](https://modelcontextprotocol.io/)
+- **ModelScope**: [模型库](https://www.modelscope.cn/models)
 
 ---
 
-**当前版本**: v0.3.0
+**当前版本**: v0.5.0
 **最后更新**: 2025-12-05
+**作者**: WAASSTT
+
+[⬆ 返回顶部](#️-funasr-mcp-服务器)

@@ -1,13 +1,13 @@
 [project]
 name = "mcp-server-funasr"
-version = "0.3.0"
-description = "基于FunASR的MCP服务器,提供语音识别、流式识别、标点恢复和说话人分离功能"
+version = "0.5.0"
+description = "基于FunASR的MCP服务器,提供语音识别、流式识别、标点恢复、说话人分离、语音增强和LLM后处理功能"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
     {name = "FunASR MCP Contributors"}
 ]
-keywords = ["funasr", "speech-recognition", "asr", "mcp", "speech-to-text"]
+keywords = ["funasr", "speech-recognition", "asr", "mcp", "speech-to-text", "llm", "audio-enhancement"]
 
 dependencies = [
     "fastmcp>=2.5.1",        # FastMCP框架
@@ -18,7 +18,8 @@ dependencies = [
     "uvicorn>=0.34.2",       # ASGI服务器
     "soundfile>=0.12.1",     # 音频文件读写
     "numpy>=1.24.0,<2.0.0",  # 数值计算
-    "scipy>=1.10.0",         # 科学计算库（音频滤波器）
+    "modelscope>=1.11.0",    # ModelScope框架 (ClearerVoice-Studio + Qwen3)
+    "transformers>=4.30.0",  # Transformers (本地Qwen3推理)
 ]
 
 [project.optional-dependencies]
@@ -28,7 +29,6 @@ client = [
     "websockets>=12.0",      # WebSocket客户端 (client_realtime.py)
     "pyaudio>=0.2.13",       # 麦克风音频采集 (client_realtime.py)
     "pynput>=1.7.6",         # 键盘输入模拟 (client_realtime.py 输入法模式)
-    "scipy>=1.10.0",         # 音频滤波器 (client_realtime.py)
 ]
 
 # 完整安装 - 包含服务器和客户端所有依赖
@@ -37,7 +37,6 @@ all = [
     "websockets>=12.0",
     "pyaudio>=0.2.13",
     "pynput>=1.7.6",
-    "scipy>=1.10.0",
 ]
 
 [build-system]

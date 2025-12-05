@@ -38,6 +38,26 @@ from typing import Generator, Optional, Dict, Any
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 尝试导入语音增强模块
+try:
+    from .audio_enhancer import AudioEnhancer
+
+    ENHANCER_AVAILABLE = True
+except ImportError:
+    logger.warning("语音增强模块不可用，将跳过增强功能")
+    ENHANCER_AVAILABLE = False
+    AudioEnhancer = None
+
+# 尝试导入LLM后处理模块
+try:
+    from .llm_postprocessor import LLMPostProcessor
+
+    LLM_AVAILABLE = True
+except ImportError:
+    logger.warning("LLM后处理模块不可用，将跳过文本优化功能")
+    LLM_AVAILABLE = False
+    LLMPostProcessor = None
+
 
 class RealtimeTranscriber:
     """实时语音识别器类
@@ -66,6 +86,10 @@ class RealtimeTranscriber:
         encoder_chunk_look_back: int = 4,
         decoder_chunk_look_back: int = 1,
         model_hub: str = "ms",
+        enable_enhancement: bool = False,
+        enable_llm_postprocess: bool = False,
+        llm_model: str = "Qwen3-235B-A22B-Instruct-2507",
+        llm_device: str = "cuda",
         **kwargs,
     ):
         """初始化实时语音识别器
@@ -77,7 +101,11 @@ class RealtimeTranscriber:
             chunk_size: 延迟配置 [0,10,5]=600ms, [0,8,4]=480ms, [0,5,5]=300ms
             encoder_chunk_look_back: encoder回溯块数
             decoder_chunk_look_back: decoder回溯块数
-            model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace)
+            model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace")
+            enable_enhancement: 是否启用实时语音增强 (DNS-Challenge技术)
+            enable_llm_postprocess: 是否启用LLM后处理优化
+            llm_model: LLM模型名称
+            llm_device: LLM计算设备 (默认: "cuda")
             **kwargs: 其他参数
 
         注意: 流式模型内置VAD,不支持外部VAD/标点/说话人模型
@@ -86,6 +114,8 @@ class RealtimeTranscriber:
         self.device = device
         self.ncpu = ncpu
         self.model_hub = model_hub
+        self.enable_enhancement = enable_enhancement
+        self.enable_llm_postprocess = enable_llm_postprocess
 
         # 流式参数配置
         self.chunk_size = chunk_size or [0, 10, 5]
@@ -94,6 +124,44 @@ class RealtimeTranscriber:
 
         # 其他配置参数
         self.kwargs = kwargs
+
+        # 初始化语音增强器
+        self.enhancer = None
+        if enable_enhancement and ENHANCER_AVAILABLE:
+            try:
+                logger.info("正在初始化实时语音增强器 (ClearerVoice-Studio)...")
+                self.enhancer = AudioEnhancer(
+                    device=device,
+                    sample_rate=16000,
+                    model_hub="ms",
+                )
+                if self.enhancer.is_available():
+                    logger.info("✓ 实时语音增强器已启用")
+                else:
+                    logger.warning("✗ 实时语音增强器不可用")
+                    self.enhancer = None
+            except Exception as e:
+                logger.warning(f"实时语音增强器初始化失败: {e}")
+                self.enhancer = None
+
+        # 初始化LLM后处理器
+        self.llm_processor = None
+        if enable_llm_postprocess and LLM_AVAILABLE:
+            try:
+                logger.info(f"正在初始化LLM后处理器 (本地模型: {llm_model})...")
+                self.llm_processor = LLMPostProcessor(
+                    model=llm_model,
+                    temperature=0.3,
+                    device=llm_device,
+                )
+                if self.llm_processor.is_available():
+                    logger.info("✓ LLM后处理器已启用")
+                else:
+                    logger.warning("✗ LLM后处理器不可用 (需要GPU和transformers库)")
+                    self.llm_processor = None
+            except Exception as e:
+                logger.warning(f"LLM后处理器初始化失败: {e}")
+                self.llm_processor = None
 
         # 加载模型
         logger.info("正在加载流式识别模型...")
@@ -162,6 +230,7 @@ class RealtimeTranscriber:
             - is_final: 是否为最终结果
             - timestamp: 时间戳信息
             - is_speech: 是否为语音段
+            - enhanced: 是否使用了语音增强
         """
         try:
             # 确保音频数据格式正确
@@ -170,10 +239,23 @@ class RealtimeTranscriber:
             elif audio_chunk.dtype != np.float32:
                 audio_chunk = audio_chunk.astype(np.float32)
 
+            # 实时语音增强预处理
+            enhanced = False
+            if self.enhancer and self.enhancer.is_available():
+                try:
+                    audio_chunk = self.enhancer.enhance_audio_stream(
+                        audio_chunk, sample_rate
+                    )
+                    enhanced = True
+                except Exception as e:
+                    logger.warning(f"实时语音增强失败: {e}")
+                    enhanced = False
+
             # 记录处理信息
             chunk_duration = len(audio_chunk) / sample_rate * 1000
             logger.debug(
-                f"处理chunk: {len(audio_chunk)}样本 ({chunk_duration:.0f}ms), is_final={is_final}"
+                f"处理chunk: {len(audio_chunk)}样本 ({chunk_duration:.0f}ms), "
+                f"enhanced={enhanced}, is_final={is_final}"
             )
 
             # 构建generate参数
@@ -192,8 +274,43 @@ class RealtimeTranscriber:
             # 格式化结果
             if result:
                 formatted = self._format_result(result, is_final=is_final)
+                formatted["enhanced"] = enhanced
+
+                # LLM后处理优化 (仅在is_final=True时进行)
+                if (
+                    is_final
+                    and self.llm_processor
+                    and self.llm_processor.is_available()
+                ):
+                    original_text = formatted.get("text", "")
+                    if original_text.strip():
+                        try:
+                            logger.debug(f"正在进行LLM后处理: {original_text[:50]}...")
+                            llm_result = self.llm_processor.optimize_text(
+                                original_text,
+                                style="natural",
+                            )
+                            if llm_result["success"]:
+                                formatted["text_original"] = original_text
+                                formatted["text"] = llm_result["optimized"]
+                                formatted["llm_optimized"] = True
+                                logger.info(
+                                    f"LLM优化完成: {original_text[:30]}... -> {llm_result['optimized'][:30]}..."
+                                )
+                            else:
+                                formatted["llm_optimized"] = False
+                        except Exception as e:
+                            logger.warning(f"LLM后处理失败: {e}")
+                            formatted["llm_optimized"] = False
+                    else:
+                        formatted["llm_optimized"] = False
+                else:
+                    formatted["llm_optimized"] = False
+
                 if formatted.get("text"):
-                    logger.info(f"识别结果: {formatted['text']} (final={is_final})")
+                    logger.info(
+                        f"识别结果: {formatted['text']} (enhanced={enhanced}, final={is_final})"
+                    )
                 return formatted
             else:
                 # 空结果(正常情况,可能是静音段)
@@ -202,6 +319,8 @@ class RealtimeTranscriber:
                     "text": "",
                     "is_final": is_final,
                     "timestamp": None,
+                    "enhanced": enhanced,
+                    "llm_optimized": False,
                 }
 
         except Exception as e:

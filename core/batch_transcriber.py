@@ -30,11 +30,23 @@ import funasr
 import soundfile as sf
 import os
 import logging
+import tempfile
+import numpy as np
 from typing import Optional, Dict, Any, List
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 尝试导入语音增强模块
+try:
+    from .audio_enhancer import AudioEnhancer
+
+    ENHANCER_AVAILABLE = True
+except ImportError:
+    logger.warning("语音增强模块不可用，将跳过增强功能")
+    ENHANCER_AVAILABLE = False
+    AudioEnhancer = None
 
 
 class BatchTranscriber:
@@ -58,6 +70,7 @@ class BatchTranscriber:
         vad_kwargs: Optional[Dict[str, Any]] = None,
         batch_size_s: int = 300,
         model_hub: str = "ms",
+        enable_enhancement: bool = False,
         **kwargs,
     ):
         """初始化批量语音识别器
@@ -72,6 +85,7 @@ class BatchTranscriber:
             vad_kwargs: VAD参数，如 {"max_single_segment_time": 30000}
             batch_size_s: 动态批处理每批总时长(秒, 推荐300)
             model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace)
+            enable_enhancement: 是否启用语音增强 (DNS-Challenge技术)
             **kwargs: 其他参数 (如hotword热词)
         """
         self.model = model
@@ -82,6 +96,7 @@ class BatchTranscriber:
         self.ncpu = ncpu
         self.model_hub = model_hub
         self.batch_size_s = batch_size_s
+        self.enable_enhancement = enable_enhancement
 
         # VAD参数
         self.vad_kwargs = {"max_single_segment_time": 30000}
@@ -93,6 +108,25 @@ class BatchTranscriber:
 
         # 其他配置参数
         self.kwargs = kwargs
+
+        # 初始化语音增强器
+        self.enhancer = None
+        if enable_enhancement and ENHANCER_AVAILABLE:
+            try:
+                logger.info("正在初始化语音增强器 (ClearerVoice-Studio)...")
+                self.enhancer = AudioEnhancer(
+                    device=device,
+                    sample_rate=16000,
+                    model_hub="ms",
+                )
+                if self.enhancer.is_available():
+                    logger.info("✓ 语音增强器已启用")
+                else:
+                    logger.warning("✗ 语音增强器不可用")
+                    self.enhancer = None
+            except Exception as e:
+                logger.warning(f"语音增强器初始化失败: {e}")
+                self.enhancer = None
 
         # 加载模型
         logger.info("正在加载批量识别模型...")
@@ -155,6 +189,7 @@ class BatchTranscriber:
                 - emotion: 情感标签 (如启用情感模型)
             - audio_path: 音频文件路径
             - audio_info: 音频文件信息
+            - enhanced: 是否使用了语音增强
         """
         # 验证音频文件
         if not os.path.exists(audio_path):
@@ -169,6 +204,29 @@ class BatchTranscriber:
             # 获取音频信息
             audio_info = sf.info(audio_path)
             logger.info(f"处理音频: {audio_path} ({audio_info.duration:.2f}秒)")
+
+            # 语音增强预处理
+            enhanced = False
+            processing_path = audio_path
+            if self.enhancer and self.enhancer.is_available():
+                try:
+                    logger.info("正在进行语音增强 (DNS-Challenge技术)...")
+                    # 读取音频
+                    audio_data, sr = sf.read(audio_path, dtype="float32")
+
+                    # 增强处理
+                    enhanced_audio = self.enhancer.enhance_audio(audio_data, sr)
+
+                    # 保存到临时文件
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    sf.write(temp_file.name, enhanced_audio, self.enhancer.sample_rate)
+                    processing_path = temp_file.name
+                    enhanced = True
+                    logger.info("✓ 语音增强完成")
+                except Exception as e:
+                    logger.warning(f"语音增强失败，使用原始音频: {e}")
+                    processing_path = audio_path
+                    enhanced = False
 
             # 构建参数
             generate_kwargs = {
@@ -190,11 +248,18 @@ class BatchTranscriber:
             # 执行识别
             if "hotword" in generate_kwargs:
                 logger.info(
-                    f"开始识别: {audio_path} (热词: {generate_kwargs['hotword']})"
+                    f"开始识别: {processing_path} (热词: {generate_kwargs['hotword']})"
                 )
             else:
-                logger.info(f"开始识别: {audio_path}")
-            result = self.asr_model.generate(input=audio_path, **generate_kwargs)
+                logger.info(f"开始识别: {processing_path}")
+            result = self.asr_model.generate(input=processing_path, **generate_kwargs)
+
+            # 清理临时文件
+            if enhanced and processing_path != audio_path:
+                try:
+                    os.unlink(processing_path)
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败: {e}")
 
             # 格式化结果
             formatted_result = self._format_result(result)
@@ -202,6 +267,7 @@ class BatchTranscriber:
                 {
                     "status": "success",
                     "audio_path": audio_path,
+                    "enhanced": enhanced,
                     "audio_info": {
                         "duration": audio_info.duration,
                         "sample_rate": audio_info.samplerate,
@@ -216,6 +282,12 @@ class BatchTranscriber:
 
         except Exception as e:
             logger.error(f"批量识别错误: {e}", exc_info=True)
+            # 清理临时文件
+            if "processing_path" in locals() and processing_path != audio_path:
+                try:
+                    os.unlink(processing_path)
+                except:
+                    pass
             return {
                 "status": "error",
                 "message": str(e),

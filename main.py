@@ -1,13 +1,15 @@
-"""FunASR MCP服务器主程序 v0.3.0
+"""FunASR MCP服务器主程序 v0.5.0
 
 基于FastMCP框架提供专业的中文语音识别服务,包括:
-- 实时流式语音识别 (Paraformer-Streaming, 仅支持ASR)
+- 实时流式语音识别 (Paraformer-Streaming)
 - 批量语音识别 (Paraformer-large + VAD分段 + 标点恢复 + 说话人分离)
-- 热词定制支持 (提高特定词汇识别准确率)
-- 多客户端并发支持 (线程锁保护模型推理)
-- 连接状态监控和会话管理
+- 深度语音增强 (ClearerVoice-Studio)
+- LLM后处理 (本地Qwen2.5-7B蒸馏模型)
+- 热词定制支持
+- 多客户端并发支持
+- 连接状态监控
 
-版本: 0.3.0
+版本: 0.5.0
 更新日期: 2025-12-05
 """
 
@@ -17,14 +19,14 @@ import json
 import asyncio
 import threading
 import uuid
+import logging
 from datetime import datetime
+from typing import Dict, Any
 
 # 设置模型缓存到项目目录 (必须在导入funasr之前)
 os.environ["MODELSCOPE_CACHE"] = "./Model"
 
-import soundfile as sf
 import numpy as np
-from scipy import signal as sp_signal
 from fastmcp import FastMCP
 from core.realtime_transcriber import RealtimeTranscriber
 from core.batch_transcriber import BatchTranscriber
@@ -34,50 +36,117 @@ from starlette.responses import JSONResponse
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-# 初始化FastMCP服务器
+# ========== 配置 ==========
+
+
+class Config:
+    """服务器配置"""
+
+    # 服务器配置
+    SERVER_HOST = "0.0.0.0"
+    SERVER_PORT = 8000
+    TIMEOUT_KEEP_ALIVE = 75
+    TIMEOUT_GRACEFUL_SHUTDOWN = 30
+
+    # 模型配置
+    MODEL_CACHE_DIR = "./Model"
+
+    # 实时识别配置
+    REALTIME_MODEL = "paraformer-zh-streaming"
+    REALTIME_CHUNK_SIZE = [0, 10, 5]  # 600ms延迟
+    REALTIME_DEVICE = "cpu"
+    REALTIME_NCPU = 4
+
+    # 批量识别配置
+    BATCH_MODEL = "paraformer-zh"
+    BATCH_VAD_MODEL = "fsmn-vad"
+    BATCH_PUNC_MODEL = "ct-punc-c"
+    BATCH_SPK_MODEL = "cam++"
+    BATCH_DEVICE = "cpu"
+    BATCH_NCPU = 4
+    BATCH_SIZE_S = 300
+    BATCH_HOTWORD = "魔搭"
+
+    # 语音增强配置
+    ENABLE_AUDIO_ENHANCEMENT = True
+
+    # LLM后处理配置
+    ENABLE_LLM_POSTPROCESS = True
+    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 蒸馏模型，更快更轻量
+    LLM_DEVICE = "cuda"
+
+    # WebSocket配置
+    WS_CHUNK_SIZE_MS = 600
+    WS_MAX_BUFFER_SIZE_CHUNKS = 3
+    WS_MAX_BUFFER_BYTES = 64000
+    WS_LOCK_TIMEOUT = 5.0
+
+
+# ========== 日志配置 ==========
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+# ========== 全局变量 ==========
+
+# FastMCP服务器
 mcp = FastMCP(name="FunASR语音服务")
 
-# ========== 并发控制 ==========
-# 线程锁保护模型推理 (FunASR模型非线程安全)
+# 并发控制
 realtime_model_lock = threading.Lock()
 batch_model_lock = threading.Lock()
-
-# 连接管理
-active_connections = {}
-connection_counter = 0
 connection_lock = threading.Lock()
 
-# ========== 实例化处理器 ==========
+# 连接管理
+active_connections: Dict[str, Dict[str, Any]] = {}
+connection_counter = 0
 
-# 实时语音识别器配置 (参考魔搭官网最佳实践)
-# 模型: paraformer-zh-streaming (内置VAD)
-# 参考: https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online
-# 注意: 流式模型内置VAD并仅支持实时ASR,不支持标点和说话人识别
-realtime_transcriber = RealtimeTranscriber(
-    model="paraformer-zh-streaming",
-    device="cpu",
-    ncpu=4,
-    chunk_size=[0, 10, 5],  # 600ms延迟(官方推荐配置)
-    encoder_chunk_look_back=4,
-    decoder_chunk_look_back=1,
-    model_hub="ms",
-)
 
-# 批量语音识别器配置 (参考魔搭官网最佳实践)
-# 模型: paraformer-zh
-# 参考: https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
-batch_transcriber = BatchTranscriber(
-    model="paraformer-zh",
-    vad_model="fsmn-vad",
-    punc_model="ct-punc-c",  # 标点恢复(可选): "ct-punc-c"
-    spk_model="cam++",  # 说话人(可选): "cam++"
-    device="cpu",
-    ncpu=4,
-    vad_kwargs={"max_single_segment_time": 30000},
-    batch_size_s=300,  # ModelScope推荐值(官方最佳实践)
-    model_hub="ms",  # ModelScope模型仓库
-    hotword="魔搭",  # 热词定制: 提高"魔搭"等特定词汇识别准确率
-)
+# ========== 模型初始化 ==========
+
+
+def init_models() -> tuple[RealtimeTranscriber, BatchTranscriber]:
+    """初始化语音识别模型"""
+    logger.info("🎯 语音增强: 已启用 (ClearerVoice-Studio)")
+    logger.info(f"✨ LLM后处理: 已启用 ({Config.LLM_MODEL})")
+
+    # 实时识别器
+    realtime = RealtimeTranscriber(
+        model=Config.REALTIME_MODEL,
+        device=Config.REALTIME_DEVICE,
+        ncpu=Config.REALTIME_NCPU,
+        chunk_size=Config.REALTIME_CHUNK_SIZE,
+        encoder_chunk_look_back=4,
+        decoder_chunk_look_back=1,
+        model_hub="ms",
+        enable_enhancement=Config.ENABLE_AUDIO_ENHANCEMENT,
+        enable_llm_postprocess=Config.ENABLE_LLM_POSTPROCESS,
+        llm_model=Config.LLM_MODEL,
+        llm_device=Config.LLM_DEVICE,
+    )
+
+    # 批量识别器
+    batch = BatchTranscriber(
+        model=Config.BATCH_MODEL,
+        vad_model=Config.BATCH_VAD_MODEL,
+        punc_model=Config.BATCH_PUNC_MODEL,
+        spk_model=Config.BATCH_SPK_MODEL,
+        device=Config.BATCH_DEVICE,
+        ncpu=Config.BATCH_NCPU,
+        vad_kwargs={"max_single_segment_time": 30000},
+        batch_size_s=Config.BATCH_SIZE_S,
+        model_hub="ms",
+        hotword=Config.BATCH_HOTWORD,
+        enable_enhancement=Config.ENABLE_AUDIO_ENHANCEMENT,
+    )
+
+    return realtime, batch
+
+
+realtime_transcriber, batch_transcriber = init_models()
 
 # ========== 注册MCP工具 ==========
 
@@ -213,7 +282,7 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
     - 通过cache维护流式状态
     - 支持多客户端并发（使用线程锁保护模型推理）
     - 添加超时保护和资源管理
-    - 带通滤波器预处理（300-3400Hz），无需额外能量检查
+    - 可选语音增强预处理（ClearerVoice-Studio）
     """
     await websocket.accept()
 
@@ -249,29 +318,13 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
         chunk_count = 0
 
         # Buffer管理 - 使用固定大小数组避免np.append性能问题
-        CHUNK_SIZE_MS = 600
-        chunk_size = int(CHUNK_SIZE_MS * 16000 / 1000)  # 9600 samples
-        max_buffer_size = chunk_size * 3  # 最多缓冲3个chunk
+        chunk_size = int(Config.WS_CHUNK_SIZE_MS * 16000 / 1000)  # 9600 samples
+        max_buffer_size = (
+            chunk_size * Config.WS_MAX_BUFFER_SIZE_CHUNKS
+        )  # 最多缓冲3个chunk
         audio_buffer = np.zeros(max_buffer_size, dtype=np.float32)
         buffer_write_index = 0
         buffer_bytes = b""
-
-        # 音频滤波器（带通滤波器：保留语音频段 300Hz-3400Hz）
-        use_filter = True
-        if use_filter:
-            nyquist = 8000  # 16kHz / 2
-            low_cutoff = 300  # 低频截止 300Hz
-            high_cutoff = 3400  # 高频截止 3400Hz（语音主要频段）
-            sos = sp_signal.butter(
-                4,
-                [low_cutoff / nyquist, high_cutoff / nyquist],
-                btype="band",
-                output="sos",
-            )
-            zi = sp_signal.sosfilt_zi(sos) * 0
-            print(
-                f"[{session_id}] 已启用音频滤波器: 带通滤波 {low_cutoff}-{high_cutoff}Hz"
-            )
 
         while True:
             # 接收消息
@@ -366,12 +419,11 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                     buffer_bytes += audio_bytes
 
                     # 防止缓冲区无限增长
-                    MAX_BUFFER_BYTES = 64000  # 约2秒的音频数据 @ 16kHz
-                    if len(buffer_bytes) > MAX_BUFFER_BYTES:
+                    if len(buffer_bytes) > Config.WS_MAX_BUFFER_BYTES:
                         print(
                             f"[{session_id}] ⚠️ 字节缓冲区过大({len(buffer_bytes)}字节)，清理旧数据"
                         )
-                        buffer_bytes = buffer_bytes[-MAX_BUFFER_BYTES:]
+                        buffer_bytes = buffer_bytes[-Config.WS_MAX_BUFFER_BYTES :]
 
                     if len(buffer_bytes) < 2:
                         continue
@@ -430,21 +482,17 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                             ]
                         buffer_write_index = remaining
 
-                        # 应用带通滤波器（保留语音频段）
-                        # 滤波器已能有效过滤噪音，无需额外能量检查
-                        if use_filter:
-                            filtered, zi = sp_signal.sosfilt(sos, chunk, zi=zi)
-                            chunk = filtered
-
                         print(
-                            f"[{session_id}] 处理音频块 {chunk_count + 1}: {len(chunk)} 样本 ({CHUNK_SIZE_MS}ms)"
+                            f"[{session_id}] 处理音频块 {chunk_count + 1}: {len(chunk)} 样本 ({Config.WS_CHUNK_SIZE_MS}ms)"
                         )
 
                         try:
                             # Paraformer流式识别 (标准FunASR流式用法)
                             # 使用线程锁保护模型推理（支持多客户端并发）
                             # 添加超时保护避免长时间阻塞
-                            lock_acquired = realtime_model_lock.acquire(timeout=5.0)
+                            lock_acquired = realtime_model_lock.acquire(
+                                timeout=Config.WS_LOCK_TIMEOUT
+                            )
                             if not lock_acquired:
                                 print(f"[{session_id}] ⚠️ 获取模型锁超时，跳过本次识别")
                                 continue
@@ -616,41 +664,45 @@ async def connections_status(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    print("正在启动FunASR MCP服务器 v0.3.0 (并发优化版)...")
-    print(f"服务器地址: http://0.0.0.0:8000")
-    print(f"MCP端点: http://0.0.0.0:8000/mcp")
+    print("正在启动FunASR MCP服务器 v0.5.0 (AI增强版)...")
+    print(f"服务器地址: http://0.0.0.0:{Config.SERVER_PORT}")
+    print(f"MCP端点: http://0.0.0.0:{Config.SERVER_PORT}/mcp")
     print("\n已加载模型:")
-    print(f"  ASR批量: {batch_transcriber.model}")
+    print(f"  ASR批量: {Config.BATCH_MODEL}")
     print(
-        f"  ASR流式: {realtime_transcriber.model} ({realtime_transcriber.chunk_size[1]*60}ms延迟)"
+        f"  ASR流式: {Config.REALTIME_MODEL} ({Config.REALTIME_CHUNK_SIZE[1]*60}ms延迟)"
     )
-    print(f"  VAD: {batch_transcriber.vad_model}")
-    print(f"  标点: {batch_transcriber.punc_model or '未启用'}")
-    print(f"  说话人: {batch_transcriber.spk_model or '未启用'}")
-    print(f"  设备: {batch_transcriber.device.upper()}")
+    print(f"  VAD: {Config.BATCH_VAD_MODEL}")
+    print(f"  标点: {Config.BATCH_PUNC_MODEL or '未启用'}")
+    print(f"  说话人: {Config.BATCH_SPK_MODEL or '未启用'}")
+    print(f"  语音增强: ClearerVoice-Studio")
+    print(f"  LLM后处理: {Config.LLM_MODEL}")
+    print(f"  设备: {Config.BATCH_DEVICE.upper()}")
     print("\n可用功能:")
     print("  ✓ 批量语音识别 (VAD分段+批量ASR，适合音频文件)")
     print("  ✓ 实时语音识别 (WebSocket流式识别，Paraformer-Streaming)")
+    print("  ✓ 深度语音增强 (ClearerVoice-Studio降噪)")
+    print("  ✓ LLM后处理优化 (Qwen2.5-7B蒸馏模型)")
     print("  ✓ 标点符号恢复 (自动添加标点符号)")
     print("  ✓ 说话人分离 (识别不同说话人)")
     print("  ✓ 多客户端并发支持 (线程锁保护模型推理)")
     print("  ✓ 音频文件验证")
     print("  ✓ 浏览器录音上传识别")
     print("\nWebSocket端点:")
-    print("  ws://0.0.0.0:8000/ws/realtime (Paraformer流式识别)")
+    print(f"  ws://0.0.0.0:{Config.SERVER_PORT}/ws/realtime (Paraformer流式识别)")
     print("\n监控端点:")
-    print("  http://0.0.0.0:8000/health - 健康检查")
-    print("  http://0.0.0.0:8000/connections - 活跃连接状态")
+    print(f"  http://0.0.0.0:{Config.SERVER_PORT}/health - 健康检查")
+    print(f"  http://0.0.0.0:{Config.SERVER_PORT}/connections - 活跃连接状态")
     print("\n使用 uvicorn 启动服务器...")
     print("提示: 生产环境可使用多进程:")
-    print("  uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4")
+    print(f"  uvicorn main:app --host 0.0.0.0 --port {Config.SERVER_PORT} --workers 4")
     print("")
 
     # 使用 uvicorn 启动服务器（增加超时配置以支持长连接）
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8000,
+        host=Config.SERVER_HOST,
+        port=Config.SERVER_PORT,
         timeout_keep_alive=75,  # Keep-alive 超时时间（秒）
         timeout_graceful_shutdown=30,  # 优雅关闭超时
     )

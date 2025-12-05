@@ -6,7 +6,6 @@
 功能:
 - 实时麦克风录音: 16kHz 采样率，支持自定义音频设备
 - 流式识别: 使用 Paraformer-Streaming 模型，低延迟输出（600ms）
-- 音频预处理: 高通滤波器（>300Hz）去除低频环境噪音
 - 两种工作模式:
   * 显示模式: 将识别结果显示在终端（默认）
   * 输入法模式: 将识别结果作为键盘输入发送到焦点窗口
@@ -33,7 +32,6 @@ import websockets
 from typing import Optional
 import shutil
 import subprocess
-from scipy import signal as sp_signal
 
 try:
     import pyaudio
@@ -123,18 +121,6 @@ class UnifiedRealtimeClient:
 
         # 用于优雅退出
         self.loop = None
-
-        # 音频滤波器（高通滤波，去除低频噪音）
-        self.use_filter = True
-        if self.use_filter:
-            # 设计高通滤波器：去除 300Hz 以下的低频噪音（如空调、风扇等）
-            nyquist = self.sample_rate / 2
-            cutoff_freq = 300  # 截止频率 300Hz
-            self.sos = sp_signal.butter(
-                4, cutoff_freq / nyquist, btype="high", output="sos"
-            )
-            self.zi = sp_signal.sosfilt_zi(self.sos)
-            self.log(f"已启用音频滤波器: 高通滤波 >{cutoff_freq}Hz")
 
     def log(self, message: str):
         """条件性日志输出"""
@@ -342,20 +328,9 @@ class UnifiedRealtimeClient:
                 # 转换为 numpy 数组
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
-                # 应用高通滤波器（去除低频噪音）
-                if self.use_filter:
-                    # 转换为 float 进行滤波
-                    audio_float = audio_array.astype(np.float32)
-                    # 应用滤波器
-                    filtered, self.zi = sp_signal.sosfilt(
-                        self.sos, audio_float, zi=self.zi
-                    )
-                    # 转换回 int16
-                    audio_array = np.clip(filtered, -32768, 32767).astype(np.int16)
-
                 chunk_count += 1
 
-                # 直接发送滤波后的音频，由服务器端模型的内置VAD处理
+                # 直接发送音频，由服务器端模型的内置VAD和增强模块处理
                 await self.send_audio_chunk(audio_array.tobytes())
                 sent_count += 1
 
