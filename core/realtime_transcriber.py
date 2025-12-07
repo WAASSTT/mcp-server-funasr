@@ -32,31 +32,38 @@
 import funasr
 import numpy as np
 import logging
-from typing import Generator, Optional, Dict, Any
+from typing import Generator, Optional, Dict, Any, List, TYPE_CHECKING, Type
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 尝试导入语音增强模块
-try:
+# 类型检查时导入，运行时可选
+if TYPE_CHECKING:
     from .audio_enhancer import AudioEnhancer
+    from .llm_postprocessor import LLMPostProcessor
+
+# 尝试导入语音增强模块
+AudioEnhancerType: Optional[Type["AudioEnhancer"]] = None
+try:
+    from .audio_enhancer import AudioEnhancer as AudioEnhancerImpl
 
     ENHANCER_AVAILABLE = True
+    AudioEnhancerType = AudioEnhancerImpl
 except ImportError:
     logger.warning("语音增强模块不可用，将跳过增强功能")
     ENHANCER_AVAILABLE = False
-    AudioEnhancer = None
 
 # 尝试导入LLM后处理模块
+LLMPostProcessorType: Optional[Type["LLMPostProcessor"]] = None
 try:
-    from .llm_postprocessor import LLMPostProcessor
+    from .llm_postprocessor import LLMPostProcessor as LLMPostProcessorImpl
 
     LLM_AVAILABLE = True
+    LLMPostProcessorType = LLMPostProcessorImpl
 except ImportError:
     logger.warning("LLM后处理模块不可用，将跳过文本优化功能")
     LLM_AVAILABLE = False
-    LLMPostProcessor = None
 
 
 class RealtimeTranscriber:
@@ -82,7 +89,7 @@ class RealtimeTranscriber:
         model: str = "paraformer-zh-streaming",
         device: str = "cpu",
         ncpu: int = 4,
-        chunk_size: list = None,
+        chunk_size: Optional[List[int]] = None,
         encoder_chunk_look_back: int = 4,
         decoder_chunk_look_back: int = 1,
         model_hub: str = "ms",
@@ -126,11 +133,11 @@ class RealtimeTranscriber:
         self.kwargs = kwargs
 
         # 初始化语音增强器
-        self.enhancer = None
-        if enable_enhancement and ENHANCER_AVAILABLE:
+        self.enhancer: Optional["AudioEnhancer"] = None
+        if enable_enhancement and ENHANCER_AVAILABLE and AudioEnhancerType is not None:
             try:
                 logger.info("正在初始化实时语音增强器 (ClearerVoice-Studio)...")
-                self.enhancer = AudioEnhancer(
+                self.enhancer = AudioEnhancerType(
                     device=device,
                     sample_rate=16000,
                     model_hub="ms",
@@ -145,11 +152,15 @@ class RealtimeTranscriber:
                 self.enhancer = None
 
         # 初始化LLM后处理器
-        self.llm_processor = None
-        if enable_llm_postprocess and LLM_AVAILABLE:
+        self.llm_processor: Optional["LLMPostProcessor"] = None
+        if (
+            enable_llm_postprocess
+            and LLM_AVAILABLE
+            and LLMPostProcessorType is not None
+        ):
             try:
                 logger.info(f"正在初始化LLM后处理器 (本地模型: {llm_model})...")
-                self.llm_processor = LLMPostProcessor(
+                self.llm_processor = LLMPostProcessorType(
                     model=llm_model,
                     temperature=0.3,
                     device=llm_device,

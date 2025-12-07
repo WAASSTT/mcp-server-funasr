@@ -32,21 +32,26 @@ import os
 import logging
 import tempfile
 import numpy as np
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING, Type
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 尝试导入语音增强模块
-try:
+# 类型检查时导入
+if TYPE_CHECKING:
     from .audio_enhancer import AudioEnhancer
 
+# 尝试导入语音增强模块
+AudioEnhancerType: Optional[Type["AudioEnhancer"]] = None
+try:
+    from .audio_enhancer import AudioEnhancer as AudioEnhancerImpl
+
     ENHANCER_AVAILABLE = True
+    AudioEnhancerType = AudioEnhancerImpl
 except ImportError:
     logger.warning("语音增强模块不可用，将跳过增强功能")
     ENHANCER_AVAILABLE = False
-    AudioEnhancer = None
 
 
 class BatchTranscriber:
@@ -63,8 +68,8 @@ class BatchTranscriber:
         self,
         model: str = "paraformer-zh",
         vad_model: str = "fsmn-vad",
-        punc_model: str = None,
-        spk_model: str = None,
+        punc_model: Optional[str] = None,
+        spk_model: Optional[str] = None,
         device: str = "cpu",
         ncpu: int = 4,
         vad_kwargs: Optional[Dict[str, Any]] = None,
@@ -110,11 +115,11 @@ class BatchTranscriber:
         self.kwargs = kwargs
 
         # 初始化语音增强器
-        self.enhancer = None
-        if enable_enhancement and ENHANCER_AVAILABLE:
+        self.enhancer: Optional["AudioEnhancer"] = None
+        if enable_enhancement and ENHANCER_AVAILABLE and AudioEnhancerType is not None:
             try:
                 logger.info("正在初始化语音增强器 (ClearerVoice-Studio)...")
-                self.enhancer = AudioEnhancer(
+                self.enhancer = AudioEnhancerType(
                     device=device,
                     sample_rate=16000,
                     model_hub="ms",
@@ -200,14 +205,16 @@ class BatchTranscriber:
                 "results": [],
             }
 
+        # 初始化变量
+        processing_path = audio_path
+        enhanced = False
+
         try:
             # 获取音频信息
             audio_info = sf.info(audio_path)
             logger.info(f"处理音频: {audio_path} ({audio_info.duration:.2f}秒)")
 
             # 语音增强预处理
-            enhanced = False
-            processing_path = audio_path
             if self.enhancer and self.enhancer.is_available():
                 try:
                     logger.info("正在进行语音增强 (DNS-Challenge技术)...")

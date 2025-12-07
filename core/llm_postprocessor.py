@@ -30,7 +30,7 @@
 
 import os
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import json
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ class LLMPostProcessor:
         self.max_tokens = max_tokens
         self.model_path = model_path or os.getenv("LOCAL_MODEL_PATH")
         self.device = device
-        self.local_model = None
-        self.local_tokenizer = None
+        self.local_model: Any = None
+        self.local_tokenizer: Any = None
 
         # 初始化本地模型
         self._init_local_model()
@@ -107,7 +107,7 @@ class LLMPostProcessor:
             # 加载模型
             self.local_model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                dtype=torch.float16 if self.device == "cuda" else torch.float32,
                 device_map="auto" if self.device == "cuda" else None,
                 trust_remote_code=True,
             )
@@ -306,7 +306,7 @@ class LLMPostProcessor:
         else:
             return f"待优化文本：{text}\n\n请优化上述文本。"
 
-    def _generate_local(self, system_prompt: str, user_prompt: str) -> tuple[str, int]:
+    def _generate_local(self, system_prompt: str, user_prompt: str) -> Tuple[str, int]:
         """使用本地模型生成文本
 
         参数:

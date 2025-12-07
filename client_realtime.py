@@ -29,9 +29,12 @@ import sys
 import signal
 import numpy as np
 import websockets
-from typing import Optional
+from typing import Optional, Any, TYPE_CHECKING, Type
 import shutil
 import subprocess
+
+if TYPE_CHECKING:
+    from pynput.keyboard import Controller, Key
 
 try:
     import pyaudio
@@ -46,10 +49,12 @@ except ImportError:
     sys.exit(1)
 
 # 检查输入法模式依赖
+KeyboardControllerType: Optional[Type[Any]] = None
 try:
-    from pynput.keyboard import Controller, Key
+    from pynput.keyboard import Controller as KeyboardController, Key
 
     PYNPUT_AVAILABLE = True
+    KeyboardControllerType = KeyboardController
 except ImportError:
     PYNPUT_AVAILABLE = False
 
@@ -67,7 +72,7 @@ class UnifiedRealtimeClient:
         chunk_size_ms: int = 600,
         input_mode: bool = False,
         show_status: bool = True,
-        use_xdotool: bool = None,
+        use_xdotool: Optional[bool] = None,
         output_all: bool = False,
     ):
         """初始化客户端
@@ -89,11 +94,12 @@ class UnifiedRealtimeClient:
         self.show_status = show_status
         self.output_all = output_all
 
-        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
-        self.audio = None
-        self.stream = None
+        self.websocket: Optional[Any] = None
+        self.audio: Optional[Any] = None
+        self.stream: Optional[Any] = None
         self.running = False
         self.results = []  # 仅显示模式使用
+        self.keyboard: Optional["Controller"] = None  # 键盘控制器
 
         # 输入法模式配置
         if self.input_mode:
@@ -106,10 +112,9 @@ class UnifiedRealtimeClient:
 
             if self.use_xdotool:
                 self.log("使用 xdotool 进行键盘输入")
-                self.keyboard = None
-            elif PYNPUT_AVAILABLE:
+            elif PYNPUT_AVAILABLE and KeyboardControllerType is not None:
                 self.log("使用 pynput 进行键盘输入")
-                self.keyboard = Controller()
+                self.keyboard = KeyboardControllerType()
             else:
                 print("错误: 输入法模式需要以下任意一个工具:")
                 print("  - Linux: sudo apt-get install xdotool")
@@ -117,7 +122,6 @@ class UnifiedRealtimeClient:
                 sys.exit(1)
         else:
             self.use_xdotool = False
-            self.keyboard = None
 
         # 用于优雅退出
         self.loop = None
@@ -146,7 +150,8 @@ class UnifiedRealtimeClient:
                 import time
 
                 time.sleep(0.05)
-                self.keyboard.type(text)
+                if self.keyboard is not None:
+                    self.keyboard.type(text)
                 self.log(f"[输入完成] {text}")
 
         except Exception as e:
@@ -185,12 +190,17 @@ class UnifiedRealtimeClient:
 
     async def start_recognition(self):
         """发送开始识别命令"""
-        await self.websocket.send(json.dumps({"type": "start"}))
+        if self.websocket is not None:
+            await self.websocket.send(json.dumps({"type": "start"}))
         self.log("✓ 已发送 start 命令")
 
     async def stop_recognition(self):
         """发送停止识别命令"""
-        if self.websocket and self.websocket.state.name == "OPEN":
+        if (
+            self.websocket is not None
+            and hasattr(self.websocket, "state")
+            and self.websocket.state.name == "OPEN"
+        ):
             await self.websocket.send(json.dumps({"type": "stop"}))
             self.log("\n✓ 已发送 stop 命令")
 
@@ -265,11 +275,12 @@ class UnifiedRealtimeClient:
         print("-" * 60)
 
         default_device = p.get_default_input_device_info()
-        default_index = default_device["index"]
+        default_index = int(default_device.get("index", 0))
 
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
-            if info["maxInputChannels"] > 0:
+            max_channels = int(info.get("maxInputChannels", 0))
+            if max_channels > 0:
                 is_default = " (默认)" if i == default_index else ""
                 print(f"[{i}] {info['name']}{is_default}")
                 print(f"    采样率: {int(info['defaultSampleRate'])} Hz")
@@ -287,7 +298,7 @@ class UnifiedRealtimeClient:
             device_info = self.audio.get_device_info_by_index(device_index)
         else:
             device_info = self.audio.get_default_input_device_info()
-            device_index = device_info["index"]
+            device_index = int(device_info["index"])
 
         self.log(f"\n使用音频设备: {device_info['name']}")
         self.log(f"采样率: {self.sample_rate} Hz")
@@ -318,12 +329,15 @@ class UnifiedRealtimeClient:
 
             while self.running:
                 # 读取音频数据
-                audio_data = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.stream.read,
-                    self.chunk_size,
-                    False,  # exception_on_overflow
-                )
+                if self.stream is not None:
+                    audio_data = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.stream.read,
+                        self.chunk_size,
+                        False,  # exception_on_overflow
+                    )
+                else:
+                    break
 
                 # 转换为 numpy 数组
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)

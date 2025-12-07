@@ -20,6 +20,10 @@ dependencies = [
     "numpy>=1.24.0,<2.0.0",  # 数值计算
     "modelscope>=1.11.0",    # ModelScope框架 (ClearerVoice-Studio + Qwen3)
     "transformers>=4.30.0",  # Transformers (本地Qwen3推理)
+    "accelerate>=0.20.0",    # 加速库 (用于模型加载和推理优化)
+    "addict>=2.4.0",         # 字典访问增强 (ModelScope依赖)
+    "datasets>=2.14.0,<3.0.0",  # 数据集处理库 (ModelScope依赖，需要<3.0版本)
+    "pillow>=9.0.0",         # 图像处理库 (ModelScope依赖)
 ]
 
 [project.optional-dependencies]

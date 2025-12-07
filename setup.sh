@@ -50,7 +50,7 @@ source .venv/bin/activate
 
 # 安装依赖
 echo -e "\n${YELLOW}[4/5] 安装依赖...${NC}"
-uv pip install -r requirements.txt
+uv pip install -e .
 echo -e "${GREEN}✓ 依赖安装完成${NC}"
 
 # 创建模型目录

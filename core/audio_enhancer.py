@@ -21,7 +21,7 @@ import numpy as np
 import soundfile as sf
 import tempfile
 import os
-from typing import Optional
+from typing import Optional, Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class AudioEnhancer:
         self.sample_rate = sample_rate
         self.model_name = model_name
         self.model_hub = model_hub
-        self.model = None
+        self.model: Optional[Any] = None
 
         try:
             from modelscope.pipelines import pipeline
@@ -91,7 +91,7 @@ class AudioEnhancer:
     def enhance_audio(
         self,
         audio: np.ndarray,
-        sr: int = None,
+        sr: Optional[int] = None,
         output_gain: float = 1.0,
     ) -> np.ndarray:
         """增强音频 - 批量处理
@@ -127,6 +127,7 @@ class AudioEnhancer:
 
             try:
                 # 执行语音增强
+                assert self.model is not None
                 result = self.model(input_path, output_path=output_path)
 
                 # 读取增强后的音频
@@ -159,7 +160,7 @@ class AudioEnhancer:
     def enhance_audio_stream(
         self,
         audio_chunk: np.ndarray,
-        sr: int = None,
+        sr: Optional[int] = None,
     ) -> np.ndarray:
         """增强音频流 - 实时处理
 

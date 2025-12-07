@@ -10,7 +10,7 @@ sleep 2
 # 检查虚拟环境
 if [ ! -d ".venv" ]; then
     echo "❌ 错误: 虚拟环境不存在"
-    echo "请先运行: uv venv && uv pip install -e ."
+    echo "请先运行: ./setup.sh"
     exit 1
 fi
 
