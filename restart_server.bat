@@ -25,7 +25,15 @@ if not exist "Model" (
 )
 
 echo ✅ 环境检查完成
-echo 💡 提示: 首次运行会自动从ModelScope下载模型
+echo 💡 提示: 首次运行会自动从 ModelScope 下载模型
+echo    【实时识别】
+echo    - Paraformer-Streaming: ~850MB
+echo    - FSMN-VAD: ~4MB
+echo    - Qwen2.5-7B GGUF: ~4.5GB
+echo    【批量识别】
+echo    - Paraformer-large: ~950MB
+echo    - CT-Punc: ~283MB
+echo    - CAM++: ~28MB
 echo.
 echo 🌐 启动服务器...
 echo    MCP 服务器: http://localhost:8000

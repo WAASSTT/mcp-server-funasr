@@ -1,4 +1,4 @@
-"""批量语音识别模块 v0.3.0
+"""批量语音识别模块 v3.0.0
 
 参考FunASR和ModelScope官方最佳实践，实现非流式批量语音识别，支持VAD分段和批量处理。
 
@@ -10,6 +10,7 @@
 - 支持热词定制 (hotword参数)
 - 动态批处理优化性能 (batch_size_s=300推荐)
 - 线程安全设计
+- 自动GPU/CPU设备检测 (v3.0.0+)
 
 模型配置:
 - ASR: paraformer-zh (Paraformer-large)
@@ -22,8 +23,8 @@
 - https://modelscope.cn/models/iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
 - https://github.com/modelscope/FunASR/blob/main/examples/industrial_data_pretraining/paraformer/
 
-版本: 0.3.0
-更新日期: 2025-12-05
+版本: 3.0.0
+更新日期: 2025-12-22
 """
 
 import funasr
@@ -32,26 +33,11 @@ import os
 import logging
 import tempfile
 import numpy as np
-from typing import Optional, Dict, Any, List, TYPE_CHECKING, Type
+from typing import Optional, Dict, Any, List
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# 类型检查时导入
-if TYPE_CHECKING:
-    from .audio_enhancer import AudioEnhancer
-
-# 尝试导入语音增强模块
-AudioEnhancerType: Optional[Type["AudioEnhancer"]] = None
-try:
-    from .audio_enhancer import AudioEnhancer as AudioEnhancerImpl
-
-    ENHANCER_AVAILABLE = True
-    AudioEnhancerType = AudioEnhancerImpl
-except ImportError:
-    logger.warning("语音增强模块不可用，将跳过增强功能")
-    ENHANCER_AVAILABLE = False
 
 
 class BatchTranscriber:
@@ -75,7 +61,6 @@ class BatchTranscriber:
         vad_kwargs: Optional[Dict[str, Any]] = None,
         batch_size_s: int = 300,
         model_hub: str = "ms",
-        enable_enhancement: bool = False,
         **kwargs,
     ):
         """初始化批量语音识别器
@@ -88,9 +73,8 @@ class BatchTranscriber:
             device: 运行设备 ("cpu" 或 "cuda:0")
             ncpu: CPU线程数
             vad_kwargs: VAD参数，如 {"max_single_segment_time": 30000}
-            batch_size_s: 动态批处理每批总时长(秒, 推荐300)
+            batch_size_s: 动态批处理每批总时长(秒, 推荣28300)
             model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace)
-            enable_enhancement: 是否启用语音增强 (DNS-Challenge技术)
             **kwargs: 其他参数 (如hotword热词)
         """
         self.model = model
@@ -101,7 +85,6 @@ class BatchTranscriber:
         self.ncpu = ncpu
         self.model_hub = model_hub
         self.batch_size_s = batch_size_s
-        self.enable_enhancement = enable_enhancement
 
         # VAD参数
         self.vad_kwargs = {"max_single_segment_time": 30000}
@@ -113,25 +96,6 @@ class BatchTranscriber:
 
         # 其他配置参数
         self.kwargs = kwargs
-
-        # 初始化语音增强器
-        self.enhancer: Optional["AudioEnhancer"] = None
-        if enable_enhancement and ENHANCER_AVAILABLE and AudioEnhancerType is not None:
-            try:
-                logger.info("正在初始化语音增强器 (ClearerVoice-Studio)...")
-                self.enhancer = AudioEnhancerType(
-                    device=device,
-                    sample_rate=16000,
-                    model_hub="ms",
-                )
-                if self.enhancer.is_available():
-                    logger.info("✓ 语音增强器已启用")
-                else:
-                    logger.warning("✗ 语音增强器不可用")
-                    self.enhancer = None
-            except Exception as e:
-                logger.warning(f"语音增强器初始化失败: {e}")
-                self.enhancer = None
 
         # 加载模型
         logger.info("正在加载批量识别模型...")
@@ -194,46 +158,24 @@ class BatchTranscriber:
                 - emotion: 情感标签 (如启用情感模型)
             - audio_path: 音频文件路径
             - audio_info: 音频文件信息
-            - enhanced: 是否使用了语音增强
         """
         # 验证音频文件
-        if not os.path.exists(audio_path):
+        validation = self.validate_audio(audio_path)
+        if validation["status"] != "valid":
             return {
                 "status": "error",
-                "message": f"音频文件不存在: {audio_path}",
+                "message": validation["message"],
                 "text": "",
                 "results": [],
             }
 
         # 初始化变量
         processing_path = audio_path
-        enhanced = False
 
         try:
             # 获取音频信息
-            audio_info = sf.info(audio_path)
-            logger.info(f"处理音频: {audio_path} ({audio_info.duration:.2f}秒)")
-
-            # 语音增强预处理
-            if self.enhancer and self.enhancer.is_available():
-                try:
-                    logger.info("正在进行语音增强 (DNS-Challenge技术)...")
-                    # 读取音频
-                    audio_data, sr = sf.read(audio_path, dtype="float32")
-
-                    # 增强处理
-                    enhanced_audio = self.enhancer.enhance_audio(audio_data, sr)
-
-                    # 保存到临时文件
-                    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                    sf.write(temp_file.name, enhanced_audio, self.enhancer.sample_rate)
-                    processing_path = temp_file.name
-                    enhanced = True
-                    logger.info("✓ 语音增强完成")
-                except Exception as e:
-                    logger.warning(f"语音增强失败，使用原始音频: {e}")
-                    processing_path = audio_path
-                    enhanced = False
+            audio_info = validation["audio_info"]
+            logger.info(f"处理音频: {audio_path} ({audio_info['duration']:.2f}秒)")
 
             # 构建参数
             generate_kwargs = {
@@ -261,26 +203,13 @@ class BatchTranscriber:
                 logger.info(f"开始识别: {processing_path}")
             result = self.asr_model.generate(input=processing_path, **generate_kwargs)
 
-            # 清理临时文件
-            if enhanced and processing_path != audio_path:
-                try:
-                    os.unlink(processing_path)
-                except Exception as e:
-                    logger.warning(f"清理临时文件失败: {e}")
-
             # 格式化结果
             formatted_result = self._format_result(result)
             formatted_result.update(
                 {
                     "status": "success",
                     "audio_path": audio_path,
-                    "enhanced": enhanced,
-                    "audio_info": {
-                        "duration": audio_info.duration,
-                        "sample_rate": audio_info.samplerate,
-                        "channels": audio_info.channels,
-                        "format": audio_info.format,
-                    },
+                    "audio_info": audio_info,
                 }
             )
 
@@ -289,12 +218,6 @@ class BatchTranscriber:
 
         except Exception as e:
             logger.error(f"批量识别错误: {e}", exc_info=True)
-            # 清理临时文件
-            if "processing_path" in locals() and processing_path != audio_path:
-                try:
-                    os.unlink(processing_path)
-                except:
-                    pass
             return {
                 "status": "error",
                 "message": str(e),
@@ -385,19 +308,33 @@ class BatchTranscriber:
             return {"status": "invalid", "message": f"文件不可读: {audio_path}"}
 
         try:
-            audio_info = sf.info(audio_path)
-            duration = audio_info.duration
-
+            info = sf.info(audio_path)
             return {
                 "status": "valid",
                 "message": "音频文件有效",
-                "details": {
-                    "duration": duration,
-                    "sample_rate": audio_info.samplerate,
-                    "channels": audio_info.channels,
-                    "format": audio_info.format,
-                    "subtype": audio_info.subtype,
-                },
+                "audio_info": {
+                    "duration": info.duration,
+                    "sample_rate": info.samplerate,
+                    "channels": info.channels,
+                    "format": info.format,
+                    "subtype": info.subtype,
+                }
             }
         except Exception as e:
             return {"status": "invalid", "message": f"音频文件无效: {e}"}
+
+    def close(self):
+        """关闭转录器并释放资源"""
+        try:
+            # BatchTranscriber 使用 FunASR AutoModel，无需显式清理
+            # 此方法保持接口一致性
+            logger.info("批量转录器资源已释放")
+        except Exception:
+            pass
+
+    def __del__(self):
+        """析构函数，确保资源清理"""
+        try:
+            self.close()
+        except Exception:
+            pass

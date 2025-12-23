@@ -1,16 +1,14 @@
-"""FunASR MCP服务器主程序 v0.5.0
+"""FunASR MCP服务器主程序 v4.0.0
 
-基于FastMCP框架提供专业的中文语音识别服务,包括:
+基于FastMCP框架提供专业的中文语音识别服务:
 - 实时流式语音识别 (Paraformer-Streaming)
 - 批量语音识别 (Paraformer-large + VAD分段 + 标点恢复 + 说话人分离)
-- 深度语音增强 (ClearerVoice-Studio)
-- LLM后处理 (本地Qwen2.5-7B蒸馏模型)
+- LLM流式后处理 (GGUF量化模型，CPU友好)
 - 热词定制支持
 - 多客户端并发支持
-- 连接状态监控
 
-版本: 0.5.0
-更新日期: 2025-12-05
+版本: 4.0.0
+更新日期: 2025-12-23
 """
 
 import os
@@ -20,6 +18,8 @@ import asyncio
 import threading
 import uuid
 import logging
+import signal
+import sys
 from datetime import datetime
 from typing import Dict, Any
 
@@ -30,6 +30,7 @@ import numpy as np
 from fastmcp import FastMCP
 from core.realtime_transcriber import RealtimeTranscriber
 from core.batch_transcriber import BatchTranscriber
+from core.device_utils import detect_device
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
@@ -54,7 +55,6 @@ class Config:
     # 实时识别配置
     REALTIME_MODEL = "paraformer-zh-streaming"
     REALTIME_CHUNK_SIZE = [0, 10, 5]  # 600ms延迟
-    REALTIME_DEVICE = "cuda"  # 使用GPU加速
     REALTIME_NCPU = 4
 
     # 批量识别配置
@@ -62,18 +62,19 @@ class Config:
     BATCH_VAD_MODEL = "fsmn-vad"
     BATCH_PUNC_MODEL = "ct-punc-c"
     BATCH_SPK_MODEL = "cam++"
-    BATCH_DEVICE = "cuda"  # 使用GPU加速
     BATCH_NCPU = 4
     BATCH_SIZE_S = 300
     BATCH_HOTWORD = "魔搭"
 
-    # 语音增强配置
-    ENABLE_AUDIO_ENHANCEMENT = True
-
-    # LLM后处理配置
-    ENABLE_LLM_POSTPROCESS = True
-    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 蒸馏模型，更快更轻量
-    LLM_DEVICE = "cuda"
+    # 流式后处理配置（GGUF格式）- 协同设计：ASR听清 + LLM说人话
+    ENABLE_POSTPROCESSOR = True
+    POSTPROCESSOR_MODEL_PATH = "./Model/models/Qwen/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    POSTPROCESSOR_TEMPERATURE = 0.3
+    POSTPROCESSOR_N_GPU_LAYERS = None  # None=自动检测
+    POSTPROCESSOR_CONTEXT_WINDOW = 3   # 上下文窗口大小
+    POSTPROCESSOR_MIN_BUFFER = 2       # 最小缓冲区大小
+    POSTPROCESSOR_MAX_BUFFER = 5       # 最大缓冲区大小
+    POSTPROCESSOR_QUALITY_CHECK = True # 启用质量检查
 
     # WebSocket配置
     WS_CHUNK_SIZE_MS = 600
@@ -110,22 +111,24 @@ connection_counter = 0
 
 def init_models() -> tuple[RealtimeTranscriber, BatchTranscriber]:
     """初始化语音识别模型"""
-    logger.info("🎯 语音增强: 已启用 (ClearerVoice-Studio)")
-    logger.info(f"✨ LLM后处理: 已启用 ({Config.LLM_MODEL})")
+    # 自动检测设备
+    device = detect_device()
+    logger.info(f"🖥️  计算设备: {device.upper()}")
+    logger.info(f"✨ LLM后处理: 已启用 (GGUF模型)")
 
     # 实时识别器
     realtime = RealtimeTranscriber(
         model=Config.REALTIME_MODEL,
-        device=Config.REALTIME_DEVICE,
+        device=device,
         ncpu=Config.REALTIME_NCPU,
         chunk_size=Config.REALTIME_CHUNK_SIZE,
         encoder_chunk_look_back=4,
         decoder_chunk_look_back=1,
         model_hub="ms",
-        enable_enhancement=Config.ENABLE_AUDIO_ENHANCEMENT,
-        enable_llm_postprocess=Config.ENABLE_LLM_POSTPROCESS,
-        llm_model=Config.LLM_MODEL,
-        llm_device=Config.LLM_DEVICE,
+        enable_llm_postprocess=Config.ENABLE_POSTPROCESSOR,
+        llm_model_path=Config.POSTPROCESSOR_MODEL_PATH,
+        llm_temperature=Config.POSTPROCESSOR_TEMPERATURE,
+        llm_n_gpu_layers=Config.POSTPROCESSOR_N_GPU_LAYERS,
     )
 
     # 批量识别器
@@ -134,19 +137,53 @@ def init_models() -> tuple[RealtimeTranscriber, BatchTranscriber]:
         vad_model=Config.BATCH_VAD_MODEL,
         punc_model=Config.BATCH_PUNC_MODEL,
         spk_model=Config.BATCH_SPK_MODEL,
-        device=Config.BATCH_DEVICE,
+        device=device,
         ncpu=Config.BATCH_NCPU,
         vad_kwargs={"max_single_segment_time": 30000},
         batch_size_s=Config.BATCH_SIZE_S,
         model_hub="ms",
         hotword=Config.BATCH_HOTWORD,
-        enable_enhancement=Config.ENABLE_AUDIO_ENHANCEMENT,
     )
 
     return realtime, batch
 
 
 realtime_transcriber, batch_transcriber = init_models()
+
+
+# ========== 优雅关闭处理 ==========
+
+def cleanup_resources():
+    """清理所有资源"""
+    try:
+        logger.info("开始清理资源...")
+
+        # 清理实时转录器
+        if hasattr(realtime_transcriber, 'close'):
+            realtime_transcriber.close()
+            logger.info("实时转录器已关闭")
+
+        # 清理批量转录器
+        if hasattr(batch_transcriber, 'close'):
+            batch_transcriber.close()
+            logger.info("批量转录器已关闭")
+
+        logger.info("✓ 资源清理完成")
+    except Exception as e:
+        logger.error(f"资源清理错误: {e}")
+
+
+def signal_handler(signum, frame):
+    """信号处理器"""
+    logger.info(f"收到信号 {signum}，正在优雅关闭...")
+    cleanup_resources()
+    sys.exit(0)
+
+
+# 注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 
 # ========== 注册MCP工具 ==========
 
@@ -159,7 +196,7 @@ realtime_transcriber, batch_transcriber = init_models()
 def transcribe_audio(
     audio_path: str,
     return_vad_segments: bool = False,
-    hotword: str = None,
+    hotword: str | None = None,
 ) -> dict:
     """批量语音识别
 
@@ -257,13 +294,10 @@ async def upload_audio_endpoint(request: Request):
             # 使用批量识别器进行转录 (使用锁保护模型推理)
             with batch_model_lock:
                 result = batch_transcriber.transcribe(temp_path)
-
             return JSONResponse({"status": "success", "result": result})
-
         finally:
             # 清理临时文件
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            os.unlink(temp_path)
 
     except Exception as e:
         return JSONResponse(
@@ -282,7 +316,7 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
     - 通过cache维护流式状态
     - 支持多客户端并发（使用线程锁保护模型推理）
     - 添加超时保护和资源管理
-    - 可选语音增强预处理（ClearerVoice-Studio）
+    - LLM流式后处理（协同设计）
     """
     await websocket.accept()
 
@@ -342,6 +376,15 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                     buffer_write_index = 0
                     buffer_bytes = b""
                     active_connections[session_id]["chunk_count"] = 0
+
+                    # 重置后处理器状态（协同设计：新会话开始）
+                    try:
+                        if realtime_transcriber and hasattr(realtime_transcriber, 'reset_postprocessor'):
+                            realtime_transcriber.reset_postprocessor()
+                            logger.info(f"[{session_id}] 后处理器已重置（新会话开始）")
+                    except Exception as e:
+                        logger.warning(f"[{session_id}] 后处理器重置失败: {e}")
+
                     await websocket.send_json(
                         {
                             "type": "started",
@@ -523,24 +566,36 @@ async def websocket_realtime_endpoint(websocket: WebSocket):
                                 ] = chunk_count
                                 text = result["text"]
 
+                                # 检查是否处于缓冲状态（LLM后处理器正在累积文本）
+                                buffering = result.get("buffering", False)
+                                llm_optimized = result.get("llm_optimized", False)
+
+                                # 只有非缓冲状态的结果才是完整的、可以输出的
+                                should_output = not buffering
+
                                 # 构建日志信息
                                 log_parts = [
-                                    f"[{session_id}] ✓ 识别文本[{chunk_count}]: {text}"
+                                    f"[{session_id}] {'[缓冲中]' if buffering else '✓'} 识别文本[{chunk_count}]: {text}"
                                 ]
+                                if llm_optimized:
+                                    log_parts.append(f"[LLM优化]")
                                 if result.get("speaker_id"):
                                     log_parts.append(f"[说话人:{result['speaker_id']}]")
                                 if result.get("emotion"):
                                     log_parts.append(f"[情感:{result['emotion']}]")
                                 print(" ".join(log_parts))
 
-                                # 发送完整识别结果（包含说话人和情感信息）
+                                # 发送识别结果（包含缓冲状态和输出标志）
                                 response = {
                                     "type": "result",
                                     "text": text,
-                                    "is_final": True,  # 标记为最终结果，客户端会输入
+                                    "is_final": result.get("is_final", False),
                                     "chunk_number": chunk_count,
                                     "timestamp": result.get("timestamp"),
                                     "session_id": session_id,
+                                    "buffering": buffering,  # 是否正在缓冲
+                                    "should_output": should_output,  # 是否应该输出给用户
+                                    "llm_optimized": llm_optimized,  # 是否经过LLM优化
                                 }
 
                                 # 添加说话人信息（如果有）
@@ -664,7 +719,7 @@ async def connections_status(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    print("正在启动FunASR MCP服务器 v0.5.0 (AI增强版)...")
+    print("正在启动FunASR MCP服务器 v3.0.0 (AI增强版)...")
     print(f"服务器地址: http://0.0.0.0:{Config.SERVER_PORT}")
     print(f"MCP端点: http://0.0.0.0:{Config.SERVER_PORT}/mcp")
     print("\n已加载模型:")
@@ -675,17 +730,15 @@ if __name__ == "__main__":
     print(f"  VAD: {Config.BATCH_VAD_MODEL}")
     print(f"  标点: {Config.BATCH_PUNC_MODEL or '未启用'}")
     print(f"  说话人: {Config.BATCH_SPK_MODEL or '未启用'}")
-    print(f"  语音增强: ClearerVoice-Studio")
-    print(f"  LLM后处理: {Config.LLM_MODEL}")
-    print(f"  设备: {Config.BATCH_DEVICE.upper()}")
+    print(f"  LLM后处理: GGUF模型 (自动检测GPU/CPU)")
+    print(f"  计算设备: {detect_device().upper()} (自动检测)")
     print("\n可用功能:")
-    print("  ✓ 批量语音识别 (VAD分段+批量ASR，适合音频文件)")
-    print("  ✓ 实时语音识别 (WebSocket流式识别，Paraformer-Streaming)")
-    print("  ✓ 深度语音增强 (ClearerVoice-Studio降噪)")
-    print("  ✓ LLM后处理优化 (Qwen2.5-7B蒸馏模型)")
-    print("  ✓ 标点符号恢复 (自动添加标点符号)")
-    print("  ✓ 说话人分离 (识别不同说话人)")
-    print("  ✓ 多客户端并发支持 (线程锁保护模型推理)")
+    print("　✓ 批量语音识别 (VAD分段+批量ASR)")
+    print("　✓ 实时语音识别 (WebSocket流式，Paraformer-Streaming)")
+    print("  ✓ LLM流式后处理 (GGUF量化模型，自动GPU/CPU)")
+    print("  ✓ 标点符号恢复")
+    print("  ✓ 说话人分离")
+    print("  ✓ 多客户端并发支持")
     print("  ✓ 音频文件验证")
     print("  ✓ 浏览器录音上传识别")
     print("\nWebSocket端点:")

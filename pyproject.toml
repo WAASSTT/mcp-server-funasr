@@ -1,13 +1,13 @@
 [project]
 name = "mcp-server-funasr"
-version = "0.5.0"
-description = "基于FunASR的MCP服务器,提供语音识别、流式识别、标点恢复、说话人分离、语音增强和LLM后处理功能"
+version = "3.0.0"
+description = "基于FunASR的MCP服务器,提供语音识别、流式识别、标点恢复、说话人分离、语音增强和LLM后处理功能 (v3.0: GGUF量化+自动GPU/CPU检测)"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
     {name = "FunASR MCP Contributors"}
 ]
-keywords = ["funasr", "speech-recognition", "asr", "mcp", "speech-to-text", "llm", "audio-enhancement"]
+keywords = ["funasr", "speech-recognition", "asr", "mcp", "speech-to-text", "llm", "audio-enhancement", "gguf"]
 
 dependencies = [
     "fastmcp>=2.5.1",        # FastMCP框架
@@ -18,11 +18,9 @@ dependencies = [
     "uvicorn>=0.34.2",       # ASGI服务器
     "soundfile>=0.12.1",     # 音频文件读写
     "numpy>=1.24.0,<2.0.0",  # 数值计算
-    "modelscope>=1.11.0",    # ModelScope框架 (ClearerVoice-Studio + Qwen3)
-    "transformers>=4.30.0",  # Transformers (本地Qwen3推理)
-    "accelerate>=0.20.0",    # 加速库 (用于模型加载和推理优化)
+    "modelscope>=1.11.0",    # ModelScope框架 (ClearerVoice-Studio)
+    "llama-cpp-python>=0.2.0",  # GGUF推理引擎 (v3.0+)
     "addict>=2.4.0",         # 字典访问增强 (ModelScope依赖)
-    "datasets>=2.14.0,<3.0.0",  # 数据集处理库 (ModelScope依赖，需要<3.0版本)
     "pillow>=9.0.0",         # 图像处理库 (ModelScope依赖)
 ]
 

@@ -1,4 +1,4 @@
-"""实时流式语音识别模块 v0.3.0
+"""实时流式语音识别模块 v4.0.0
 
 参考FunASR和ModelScope官方流式识别最佳实践，实现边输入边识别的实时转录功能。
 
@@ -9,6 +9,12 @@
 - 通过 cache 维护流式状态
 - 支持 chunk_size 配置延迟
 - 线程安全设计，支持多客户端并发
+- 自动GPU/CPU设备检测
+- 集成统一流式后处理器 (v4.0.0+)
+
+协同设计原则 (v4.0.0+):
+- ASR 负责"听清"：准确的语音识别
+- LLM 负责"说人话"：将口语转换为通顺的书面语
 
 注意: 流式模型仅支持实时ASR,不支持标点恢复和说话人识别
 
@@ -25,45 +31,29 @@
 - https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online
 - https://github.com/modelscope/FunASR/blob/main/examples/industrial_data_pretraining/paraformer_streaming/
 
-版本: 0.3.0
-更新日期: 2025-12-05
+版本: 4.0.0
+更新日期: 2025-12-23
 """
 
 import funasr
 import numpy as np
 import logging
-from typing import Generator, Optional, Dict, Any, List, TYPE_CHECKING, Type
+from typing import Generator, Optional, Dict, Any, List, Type
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 类型检查时导入，运行时可选
-if TYPE_CHECKING:
-    from .audio_enhancer import AudioEnhancer
-    from .llm_postprocessor import LLMPostProcessor
-
-# 尝试导入语音增强模块
-AudioEnhancerType: Optional[Type["AudioEnhancer"]] = None
+# 尝试导入统一流式后处理器
+StreamingPostProcessorType: Optional[Type] = None
 try:
-    from .audio_enhancer import AudioEnhancer as AudioEnhancerImpl
+    from .streaming_postprocessor import StreamingPostProcessor
 
-    ENHANCER_AVAILABLE = True
-    AudioEnhancerType = AudioEnhancerImpl
+    POSTPROCESSOR_AVAILABLE = True
+    StreamingPostProcessorType = StreamingPostProcessor
 except ImportError:
-    logger.warning("语音增强模块不可用，将跳过增强功能")
-    ENHANCER_AVAILABLE = False
-
-# 尝试导入LLM后处理模块
-LLMPostProcessorType: Optional[Type["LLMPostProcessor"]] = None
-try:
-    from .llm_postprocessor import LLMPostProcessor as LLMPostProcessorImpl
-
-    LLM_AVAILABLE = True
-    LLMPostProcessorType = LLMPostProcessorImpl
-except ImportError:
-    logger.warning("LLM后处理模块不可用，将跳过文本优化功能")
-    LLM_AVAILABLE = False
+    logger.warning("流式后处理器不可用，将跳过文本优化功能")
+    POSTPROCESSOR_AVAILABLE = False
 
 
 class RealtimeTranscriber:
@@ -93,10 +83,11 @@ class RealtimeTranscriber:
         encoder_chunk_look_back: int = 4,
         decoder_chunk_look_back: int = 1,
         model_hub: str = "ms",
-        enable_enhancement: bool = False,
         enable_llm_postprocess: bool = False,
-        llm_model: str = "Qwen3-235B-A22B-Instruct-2507",
-        llm_device: str = "cuda",
+        llm_model_path: Optional[str] = None,
+        llm_temperature: float = 0.3,
+        llm_n_threads: Optional[int] = None,
+        llm_n_gpu_layers: Optional[int] = None,
         **kwargs,
     ):
         """初始化实时语音识别器
@@ -109,10 +100,11 @@ class RealtimeTranscriber:
             encoder_chunk_look_back: encoder回溯块数
             decoder_chunk_look_back: decoder回溯块数
             model_hub: 模型仓库 ("ms"=ModelScope, "hf"=HuggingFace")
-            enable_enhancement: 是否启用实时语音增强 (DNS-Challenge技术)
-            enable_llm_postprocess: 是否启用LLM后处理优化
-            llm_model: LLM模型名称
-            llm_device: LLM计算设备 (默认: "cuda")
+            enable_llm_postprocess: 是否启用LLM流式后处理优化
+            llm_model_path: LLM模型路径 (GGUF格式，如qwen2.5-7b-instruct-q4_k_m.gguf)
+            llm_temperature: LLM温度参数 (0.1-0.5)
+            llm_n_threads: LLM CPU线程数 (None=自动)
+            llm_n_gpu_layers: LLM GPU加速层数 (None=自动检测，0=纯CPU)
             **kwargs: 其他参数
 
         注意: 流式模型内置VAD,不支持外部VAD/标点/说话人模型
@@ -121,7 +113,6 @@ class RealtimeTranscriber:
         self.device = device
         self.ncpu = ncpu
         self.model_hub = model_hub
-        self.enable_enhancement = enable_enhancement
         self.enable_llm_postprocess = enable_llm_postprocess
 
         # 流式参数配置
@@ -132,47 +123,48 @@ class RealtimeTranscriber:
         # 其他配置参数
         self.kwargs = kwargs
 
-        # 初始化语音增强器
-        self.enhancer: Optional["AudioEnhancer"] = None
-        if enable_enhancement and ENHANCER_AVAILABLE and AudioEnhancerType is not None:
-            try:
-                logger.info("正在初始化实时语音增强器 (ClearerVoice-Studio)...")
-                self.enhancer = AudioEnhancerType(
-                    device=device,
-                    sample_rate=16000,
-                    model_hub="ms",
-                )
-                if self.enhancer.is_available():
-                    logger.info("✓ 实时语音增强器已启用")
-                else:
-                    logger.warning("✗ 实时语音增强器不可用")
-                    self.enhancer = None
-            except Exception as e:
-                logger.warning(f"实时语音增强器初始化失败: {e}")
-                self.enhancer = None
-
-        # 初始化LLM后处理器
-        self.llm_processor: Optional["LLMPostProcessor"] = None
+        # 初始化流式后处理器（协同层：ASR听清 + LLM说人话）
+        self.postprocessor = None
         if (
             enable_llm_postprocess
-            and LLM_AVAILABLE
-            and LLMPostProcessorType is not None
+            and POSTPROCESSOR_AVAILABLE
+            and StreamingPostProcessorType is not None
+            and llm_model_path
         ):
             try:
-                logger.info(f"正在初始化LLM后处理器 (本地模型: {llm_model})...")
-                self.llm_processor = LLMPostProcessorType(
-                    model=llm_model,
-                    temperature=0.3,
-                    device=llm_device,
+                logger.info("正在初始化流式后处理器...")
+                logger.info("  架构: ASR听清 + LLM说人话 (协同设计)")
+                self.postprocessor = StreamingPostProcessorType(
+                    model_path=llm_model_path,
+                    temperature=llm_temperature,
+                    max_tokens=512,
+                    enable_fallback=True,
+                    n_threads=llm_n_threads,
+                    n_gpu_layers=llm_n_gpu_layers,
+                    context_window_size=3,
+                    min_buffer_size=2,
+                    max_buffer_size=5,
+                    enable_timestamp_alignment=True,
+                    enable_quality_check=True,
+                    min_retention_rate=0.4
                 )
-                if self.llm_processor.is_available():
-                    logger.info("✓ LLM后处理器已启用")
+                if self.postprocessor.is_available():
+                    logger.info("✓ 流式后处理器已启用")
+                    logger.info("  特性: LLM优化 + 智能缓冲 + 上下文感知 + 质量保证")
+                    stats = self.postprocessor.get_stats()
+                    llm_info = stats.get('llm_info', {})
+                    device_info = "GPU" if llm_info.get('n_gpu_layers', 0) > 0 else "CPU"
+                    logger.info(f"  运行设备: {device_info}")
+                    if llm_info.get('n_gpu_layers', 0) > 0:
+                        logger.info(f"  GPU加速: {llm_info['n_gpu_layers']} 层")
                 else:
-                    logger.warning("✗ LLM后处理器不可用 (需要GPU和transformers库)")
-                    self.llm_processor = None
+                    logger.warning("✗ 流式后处理器不可用")
+                    self.postprocessor = None
             except Exception as e:
-                logger.warning(f"LLM后处理器初始化失败: {e}")
-                self.llm_processor = None
+                logger.warning(f"流式后处理器初始化失败: {e}")
+                self.postprocessor = None
+        elif enable_llm_postprocess and not llm_model_path:
+            logger.warning("✗ 启用LLM后处理但未指定模型路径 (llm_model_path)")
 
         # 加载模型
         logger.info("正在加载流式识别模型...")
@@ -241,7 +233,6 @@ class RealtimeTranscriber:
             - is_final: 是否为最终结果
             - timestamp: 时间戳信息
             - is_speech: 是否为语音段
-            - enhanced: 是否使用了语音增强
         """
         try:
             # 确保音频数据格式正确
@@ -250,23 +241,10 @@ class RealtimeTranscriber:
             elif audio_chunk.dtype != np.float32:
                 audio_chunk = audio_chunk.astype(np.float32)
 
-            # 实时语音增强预处理
-            enhanced = False
-            if self.enhancer and self.enhancer.is_available():
-                try:
-                    audio_chunk = self.enhancer.enhance_audio_stream(
-                        audio_chunk, sample_rate
-                    )
-                    enhanced = True
-                except Exception as e:
-                    logger.warning(f"实时语音增强失败: {e}")
-                    enhanced = False
-
             # 记录处理信息
             chunk_duration = len(audio_chunk) / sample_rate * 1000
             logger.debug(
-                f"处理chunk: {len(audio_chunk)}样本 ({chunk_duration:.0f}ms), "
-                f"enhanced={enhanced}, is_final={is_final}"
+                f"处理chunk: {len(audio_chunk)}样本 ({chunk_duration:.0f}ms), is_final={is_final}"
             )
 
             # 构建generate参数
@@ -285,33 +263,55 @@ class RealtimeTranscriber:
             # 格式化结果
             if result:
                 formatted = self._format_result(result, is_final=is_final)
-                formatted["enhanced"] = enhanced
 
-                # LLM后处理优化 (仅在is_final=True时进行)
-                if (
-                    is_final
-                    and self.llm_processor
-                    and self.llm_processor.is_available()
-                ):
+                # 协同后处理：ASR听清 + LLM说人话
+                if self.postprocessor:
                     original_text = formatted.get("text", "")
                     if original_text.strip():
                         try:
-                            logger.debug(f"正在进行LLM后处理: {original_text[:50]}...")
-                            llm_result = self.llm_processor.optimize_text(
-                                original_text,
-                                style="natural",
+                            # 提取时间戳信息
+                            timestamp_info = None
+                            if formatted.get("timestamp"):
+                                ts = formatted["timestamp"]
+                                if isinstance(ts, (list, tuple)) and len(ts) >= 2:
+                                    timestamp_info = {
+                                        'start': float(ts[0]) if ts[0] is not None else 0.0,
+                                        'end': float(ts[1]) if ts[1] is not None else 0.0
+                                    }
+
+                            # 协同处理：ASR提供原始识别，LLM优化为人话
+                            post_result = self.postprocessor.process_chunk(
+                                text=original_text,
+                                is_final=is_final,
+                                timestamp_info=timestamp_info
                             )
-                            if llm_result["success"]:
-                                formatted["text_original"] = original_text
-                                formatted["text"] = llm_result["optimized"]
+
+                            # 如果后处理器返回了结果（缓冲区已刷新）
+                            if post_result['should_output']:
+                                formatted["text_asr_raw"] = post_result['original']  # ASR听清的结果
+                                formatted["text"] = post_result['optimized']  # LLM说人话的结果
                                 formatted["llm_optimized"] = True
+                                formatted["optimization_method"] = post_result['method']
+                                formatted["optimization_success"] = post_result['success']
+                                formatted["quality_score"] = post_result['quality_score']
+
+                                # 添加词级时间戳（可选）
+                                if post_result.get('word_timestamps'):
+                                    formatted["word_timestamps"] = post_result['word_timestamps']
+
                                 logger.info(
-                                    f"LLM优化完成: {original_text[:30]}... -> {llm_result['optimized'][:30]}..."
+                                    f"协同优化: ASR听清[{post_result['original'][:20]}...] -> "
+                                    f"LLM说人话[{post_result['optimized'][:20]}...] "
+                                    f"(方法={post_result['method']}, 质量={post_result['quality_score']:.2f})"
                                 )
                             else:
+                                # 还在缓冲中，暂不输出优化结果
                                 formatted["llm_optimized"] = False
+                                formatted["buffering"] = True
+                                logger.debug(f"chunk已缓冲(等待句子边界): {original_text[:30]}...")
+
                         except Exception as e:
-                            logger.warning(f"LLM后处理失败: {e}")
+                            logger.warning(f"协同后处理失败: {e}")
                             formatted["llm_optimized"] = False
                     else:
                         formatted["llm_optimized"] = False
@@ -320,7 +320,7 @@ class RealtimeTranscriber:
 
                 if formatted.get("text"):
                     logger.info(
-                        f"识别结果: {formatted['text']} (enhanced={enhanced}, final={is_final})"
+                        f"识别结果: {formatted['text']} (final={is_final})"
                     )
                 return formatted
             else:
@@ -330,7 +330,6 @@ class RealtimeTranscriber:
                     "text": "",
                     "is_final": is_final,
                     "timestamp": None,
-                    "enhanced": enhanced,
                     "llm_optimized": False,
                 }
 
@@ -379,3 +378,45 @@ class RealtimeTranscriber:
             formatted["is_speech"] = bool(result.strip())
 
         return formatted
+
+    def reset_postprocessor(self):
+        """重置后处理器状态
+
+        在开始新的识别会话时调用，清空上下文缓存。
+        适用于多用户场景或会话切换。
+        """
+        if self.postprocessor:
+            self.postprocessor.reset()
+            logger.info("流式后处理器已重置")
+
+    def get_postprocessor_stats(self) -> Dict[str, Any]:
+        """获取后处理器统计信息
+
+        返回:
+            统计信息字典
+        """
+        stats = {}
+
+        if self.postprocessor:
+            stats = self.postprocessor.get_stats()
+            stats['enabled'] = True
+        else:
+            stats['enabled'] = False
+
+        return stats
+
+    def close(self):
+        """关闭转录器并释放资源"""
+        try:
+            if self.postprocessor and hasattr(self.postprocessor, 'close'):
+                self.postprocessor.close()
+                logger.info("后处理器资源已释放")
+        except Exception:
+            pass
+
+    def __del__(self):
+        """析构函数，确保资源清理"""
+        try:
+            self.close()
+        except Exception:
+            pass

@@ -83,7 +83,15 @@ for /r Model %%f in (model.pt) do set /a MODEL_COUNT+=1
 
 if %MODEL_COUNT% EQU 0 (
     echo 💡 提示: 未检测到已下载的模型
-    echo    首次运行时会自动从ModelScope下载^(约1.1GB^)
+    echo    首次运行时会自动从 ModelScope 下载：
+    echo    【实时识别】
+    echo    - Paraformer-Streaming: ~850MB ^(实时ASR^)
+    echo    - FSMN-VAD: ~4MB ^(VAD检测^)
+    echo    - Qwen2.5-7B GGUF: ~4.5GB ^(LLM后处理^)
+    echo    【批量识别】
+    echo    - Paraformer-large: ~950MB ^(批量ASR^)
+    echo    - CT-Punc: ~283MB ^(标点恢复^)
+    echo    - CAM++: ~28MB ^(说话人分离^)
     echo.
     set /p DOWNLOAD="是否现在预下载模型? (y/N) "
     if /i "%DOWNLOAD%"=="y" (

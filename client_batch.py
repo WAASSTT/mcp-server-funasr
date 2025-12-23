@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FunASR 批量语音识别客户端 v0.3.0
+"""FunASR 批量语音识别客户端 v4.0.0
 
 使用 HTTP/MCP 协议调用进行批量语音识别（非流式）
 适合处理音频文件，支持 VAD 分段、标点恢复、说话人分离和热词定制
@@ -11,8 +11,8 @@
 - 批量识别: 使用 Paraformer 进行高精度识别
 - 热词支持: 提高特定词汇识别准确率
 
-版本: 0.3.0
-更新日期: 2025-12-05
+版本: 4.0.0
+更新日期: 2025-12-23
 """
 
 import sys
@@ -47,7 +47,7 @@ class FunASRClient:
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "funasr-client", "version": "0.3.0"},
+                "clientInfo": {"name": "funasr-client", "version": "4.0.0"},
             },
         }
 

@@ -1,50 +1,27 @@
-#!/usr/bin/env python
-"""预下载 FunASR 和 LLM 模型 v0.5.0
-
-此脚本用于预下载所需的模型到本地缓存目录。
-模型会保存到 ./Model/ 目录下。
+#!/usr/bin/env python3
+"""预下载 FunASR 和 LLM 模型 v4.0.0
 
 支持的模型:
-【语音识别模型】
-1. paraformer-zh - 批量语音识别模型 (Paraformer-large)
-   ModelScope: iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
-   功能: 高精度非流式语音识别，支持长语音处理
-
-2. paraformer-zh-streaming - 流式识别模型 (Paraformer-online)
-   ModelScope: iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online
-   功能: 实时流式识别，延迟低至600ms
-
+【语音识别模型 - 必需】
+1. paraformer-zh-streaming - 实时流式识别模型 (Paraformer-online)
+2. paraformer-zh - 批量语音识别模型 (Paraformer-large)
 3. fsmn-vad - 语音活动检测模型
-   ModelScope: iic/speech_fsmn_vad_zh-cn-16k-common-pytorch
-   功能: 高精度语音活动检测，智能分段处理
 
-4. ct-punc - 标点符号恢复模型 (CT-Transformer)
-   ModelScope: iic/punc_ct-transformer_cn-en-common-vocab471067-large
-   功能: 自动添加标点符号，支持中英文混合
+【增强模型 - 批量识别必需】
+4. ct-punc - 标点符号恢复模型 (CT-Transformer, 批量识别用)
+5. cam++ - 说话人分离模型 (CAM++, 批量识别用)
 
-5. cam++ - 说话人分离模型 (CAM++)
-   ModelScope: iic/speech_campplus_sv_zh-cn_16k-common
-   功能: 说话人验证和分离，支持多说话人场景
+【LLM 后处理模型 - GGUF 格式 - 实时识别用】
+6. Qwen2.5-7B-Instruct-GGUF - 流式 LLM 后处理（推荐，~4.5GB）
+7. Qwen2.5-1.8B-Instruct-GGUF - 轻量级 LLM（低配推荐，~1.5GB）
 
-【语音增强模型】
-6. ClearerVoice-Studio - 语音增强模型
-   ModelScope: iic/ClearerVoice-Studio
-   功能: 深度噪声抑制、去混响、语音清晰度提升
-
-【大语言模型】
-7. Qwen3-235B-A22B-Instruct-2507 - LLM后处理模型
-   ModelScope: Qwen/Qwen3-235B-A22B-Instruct-2507
-   功能: 优化语音识别结果，转化为自然流畅的人类语言
-   参考: https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B-Instruct-2507
-
-版本: 0.5.0
-更新日期: 2025-12-05
+版本: 4.0.0
+更新日期: 2025-12-23
 """
 
 import os
 import sys
 
-# 设置模型缓存目录
 os.environ["MODELSCOPE_CACHE"] = "./Model"
 
 try:
@@ -57,29 +34,10 @@ except ImportError:
 
 
 def download_model(model_id: str, model_name: str, device: str = "cpu"):
-    """下载ASR模型
-
-    参数:
-        model_id: ModelScope模型ID
-        model_name: 模型显示名称
-        device: 运行设备
-    """
-    print(f"\n{'='*60}")
-    print(f"📦 正在下载: {model_name}")
-    print(f"   模型ID: {model_id}")
-    print(f"{'='*60}")
-
+    """下载ASR模型"""
+    print(f"\n{'='*60}\n📦 正在下载: {model_name}\n   模型ID: {model_id}\n{'='*60}")
     try:
-        # 使用 AutoModel 自动下载
-        print("正在初始化模型...")
-        model_kwargs = {
-            "model": model_id,
-            "device": device,
-            "disable_update": True,
-            "model_hub": "ms",
-        }
-
-        model = AutoModel(**model_kwargs)
+        model = AutoModel(model=model_id, device=device, disable_update=True, model_hub="ms")
         print(f"✅ {model_name} 下载成功!")
         return True
     except Exception as e:
@@ -88,26 +46,12 @@ def download_model(model_id: str, model_name: str, device: str = "cpu"):
 
 
 def download_pipeline_model(model_id: str, model_name: str, task: str):
-    """下载ModelScope Pipeline模型 (如语音增强)
-
-    参数:
-        model_id: ModelScope模型ID
-        model_name: 模型显示名称
-        task: 任务类型
-    """
-    print(f"\n{'='*60}")
-    print(f"📦 正在下载: {model_name}")
-    print(f"   模型ID: {model_id}")
-    print(f"   任务类型: {task}")
-    print(f"{'='*60}")
-
+    """下载Pipeline模型（如语音增强）"""
+    print(f"\n{'='*60}\n📦 正在下载: {model_name}\n   模型ID: {model_id}\n{'='*60}")
     try:
         from modelscope.pipelines import pipeline
         from modelscope.utils.constant import Tasks
-
-        print("正在初始化pipeline...")
-        task_enum = getattr(Tasks, task, task)
-        pipe = pipeline(task=task_enum, model=model_id)
+        pipe = pipeline(task=getattr(Tasks, task, task), model=model_id)
         print(f"✅ {model_name} 下载成功!")
         return True
     except Exception as e:
@@ -115,262 +59,134 @@ def download_pipeline_model(model_id: str, model_name: str, task: str):
         return False
 
 
-def download_llm_model(model_id: str, model_name: str):
-    """下载LLM模型 (使用snapshot_download)
-
-    参数:
-        model_id: ModelScope模型ID
-        model_name: 模型显示名称
-    """
-    print(f"\n{'='*60}")
-    print(f"📦 正在下载: {model_name}")
-    print(f"   模型ID: {model_id}")
-    print(f"   警告: LLM模型体积较大 (可能超过100GB)，需要较长时间和足够磁盘空间")
-    print(f"{'='*60}")
-
+def download_gguf_model(repo_id: str, filename: str, model_name: str):
+    """下载GGUF格式的LLM模型（从HuggingFace）"""
+    print(f"\n{'='*60}\n📦 正在下载: {model_name}\n   仓库: {repo_id}\n   文件: {filename}\n{'='*60}")
     try:
-        from modelscope import snapshot_download
-
-        print("正在下载模型文件...")
-        model_dir = snapshot_download(model_id, cache_dir="./Model/models")
-        print(f"✅ {model_name} 下载成功!")
-        print(f"   保存路径: {model_dir}")
+        from huggingface_hub import hf_hub_download
+        save_dir = os.path.join("./Model/models/Qwen")
+        os.makedirs(save_dir, exist_ok=True)
+        file_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=save_dir)
+        print(f"✅ {model_name} 下载成功!\n   保存路径: {file_path}")
         return True
     except Exception as e:
-        print(f"❌ {model_name} 下载失败: {e}")
+        print(f"❌ {model_name} 下载失败: {e}\n💡 手动下载: https://huggingface.co/{repo_id}/tree/main")
+        if "huggingface_hub" in str(e):
+            print("   请安装: pip install huggingface-hub")
         return False
 
 
 def check_existing_models():
     """检查已下载的模型"""
-    print("\n" + "=" * 60)
-    print("🔍 检查现有模型...")
-    print("=" * 60)
-
+    print("\n" + "=" * 60 + "\n🔍 检查现有模型...\n" + "=" * 60)
     model_dir = "./Model"
-    if not os.path.exists(model_dir):
-        print("📁 模型目录不存在，将创建...")
-        os.makedirs(model_dir, exist_ok=True)
-        return []
+    os.makedirs(model_dir, exist_ok=True)
 
-    # 检查目录内容
     existing = []
     for root, dirs, files in os.walk(model_dir):
-        if "model.pt" in files or "config.yaml" in files:
-            model_path = os.path.relpath(root, model_dir)
-            existing.append(model_path)
-            print(f"  ✓ 已存在: {model_path}")
+        if "model.pt" in files or "config.yaml" in files or any(".gguf" in f for f in files):
+            existing.append(os.path.relpath(root, model_dir))
 
-    if not existing:
-        print("  ℹ️  未找到已下载的模型")
-
+    if existing:
+        for e in existing:
+            print(f"  ✓ {e}")
+    else:
+        print("  未找到已下载的模型")
     return existing
 
 
 def main():
     """主函数"""
-    print("\n" + "=" * 60)
-    print("FunASR 模型下载工具")
-    print("=" * 60)
+    print("\n" + "=" * 60 + "\nFunASR 模型下载工具 v3.0.0\n" + "=" * 60)
     print(f"缓存目录: {os.path.abspath('./Model')}")
+    check_existing_models()
 
-    # 检查现有模型
-    existing_models = check_existing_models()
-
-    # 定义核心模型（必需）
+    # 定义所有模型
     core_models = [
-        {
-            "id": "paraformer-zh",
-            "name": "Paraformer-zh (批量识别)",
-            "required": True,
-        },
-        {
-            "id": "paraformer-zh-streaming",
-            "name": "Paraformer-Streaming (流式识别)",
-            "required": True,
-        },
-        {
-            "id": "fsmn-vad",
-            "name": "FSMN-VAD (语音活动检测)",
-            "required": True,
-        },
+        {"id": "paraformer-zh-streaming", "name": "Paraformer-Streaming (实时)", "type": "asr"},
+        {"id": "paraformer-zh", "name": "Paraformer-zh (批量)", "type": "asr"},
+        {"id": "fsmn-vad", "name": "FSMN-VAD (VAD)", "type": "asr"},
+    ]
+    batch_models = [
+        {"id": "ct-punc-c", "name": "CT-Punc (标点-批量必需)", "type": "asr"},
+        {"id": "cam++", "name": "CAM++ (说话人-批量必需)", "type": "asr"},
+    ]
+    gguf_models = [
+        {"repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", "name": "Qwen2.5-7B-Q4_K_M (part 1/2)", "type": "gguf"},
+        {"repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", "name": "Qwen2.5-7B-Q4_K_M (part 2/2)", "type": "gguf"},
+        {"repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q3_k_m.gguf", "name": "Qwen2.5-7B-Q3_K_M (轻量)", "type": "gguf"},
     ]
 
-    # 定义可选模型（增强功能）
-    optional_models = [
-        {
-            "id": "ct-punc-c",
-            "name": "CT-Punc-C (标点恢复)",
-            "required": False,
-        },
-        {
-            "id": "cam++",
-            "name": "CAM++ (说话人分离)",
-            "required": False,
-        },
-        {
-            "id": "iic/ClearerVoice-Studio",
-            "name": "ClearerVoice-Studio (语音增强)",
-            "required": False,
-        },
-    ]
+    print(f"\n可用模型: {len(core_models)}核心 + {len(batch_models)}批量 + {len(gguf_models)}LLM")
+    print("\n请选择:")
+    print("  1. 核心模型 (最小-仅实时识别)")
+    print("  2. 核心+批量模型 (全功能)")
+    print("  3. 核心+Qwen2.5-7B-GGUF (实时+LLM优化)")
+    print("  4. 完整安装 (全部-推荐)")
+    print("  5. 自定义")
+    print("  6. 退出")
 
-    # 定义LLM模型（后处理）
-    llm_models = [
-        {
-            "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
-            "name": "Qwen3-235B (LLM后处理)",
-            "required": False,
-        },
-    ]
-
-    all_models = core_models + optional_models + llm_models
-
-    print(f"\n共 {len(all_models)} 个可用模型:")
-    print(f"  - 核心模型: {len(core_models)} 个 (ASR必需)")
-    print(f"  - 可选模型: {len(optional_models)} 个 (增强功能)")
-    print(f"  - LLM模型: {len(llm_models)} 个 (后处理)")
-
-    print("\n请选择操作:")
-    print("  1. 仅下载核心模型 (最小安装，仅ASR+VAD)")
-    print("  2. 下载核心模型 + 标点恢复")
-    print("  3. 下载核心模型 + 标点恢复 + 说话人分离")
-    print("  4. 下载核心模型 + ClearerVoice-Studio语音增强")
-    print("  5. 下载核心模型 + Qwen3-235B LLM后处理")
-    print("  6. 下载所有ASR模型 + LLM (推荐完整安装)")
-    print("  7. 自定义选择")
-    print("  8. 退出")
-
-    choice = input("\n请输入选项 [1-8]: ").strip()
-
-    success_count = 0
+    choice = input("\n请输入 [1-6]: ").strip()
     models_to_download = []
 
-    if choice == "1":
-        # 仅核心模型
-        models_to_download = core_models
-        print("\n将下载核心模型...")
-
-    elif choice == "2":
-        # 核心 + 标点
-        models_to_download = core_models + [optional_models[0]]
-        print("\n将下载核心模型 + 标点恢复...")
-
-    elif choice == "3":
-        # 核心 + 标点 + 说话人
-        models_to_download = core_models + optional_models[:2]
-        print("\n将下载核心模型 + 标点恢复 + 说话人分离...")
-
-    elif choice == "4":
-        # 核心 + 语音增强
-        models_to_download = core_models + [optional_models[2]]
-        print("\n将下载核心模型 + ClearerVoice-Studio语音增强...")
-
+    if choice == "1": models_to_download = core_models
+    elif choice == "2": models_to_download = core_models + batch_models
+    elif choice == "3": models_to_download = core_models + gguf_models[:2]  # part1 + part2
+    elif choice == "4": models_to_download = core_models + batch_models + gguf_models[:2]
     elif choice == "5":
-        # 核心 + LLM
-        models_to_download = core_models + llm_models
-        print("\n将下载核心模型 + Qwen3-235B LLM后处理...")
-
-    elif choice == "6":
-        # 所有模型 (推荐)
-        models_to_download = all_models
-        print("\n将下载所有模型 (完整安装)...")
-
-    elif choice == "7":
-        # 自定义选择
-        print("\n可选模型列表:")
         models_to_download = core_models.copy()
-        print("  核心模型 (自动包含):")
-        for i, model in enumerate(core_models):
-            print(f"    {i+1}. {model['name']}")
-
-        print("\n  增强功能模型 (输入序号选择，多个用空格分隔):")
-        for i, model in enumerate(optional_models):
-            print(f"    {i+1}. {model['name']}")
-
-        selected = input("\n请输入要下载的增强模型序号 (直接回车跳过): ").strip()
-        if selected:
-            try:
-                indices = [int(x.strip()) - 1 for x in selected.split()]
-                for idx in indices:
-                    if 0 <= idx < len(optional_models):
-                        models_to_download.append(optional_models[idx])
-                    else:
-                        print(f"  警告: 序号 {idx+1} 无效，已跳过")
-            except ValueError:
-                print("  警告: 输入格式错误，跳过增强模型")
-
-        print("\n  LLM后处理模型:")
-        for i, model in enumerate(llm_models):
-            print(f"    {i+1}. {model['name']}")
-
-        llm_choice = input("\n是否下载LLM模型? (y/N): ").strip().lower()
-        if llm_choice == "y":
-            models_to_download.extend(llm_models)
-            print("  已添加LLM模型到下载列表")
-
-    elif choice == "8":
-        print("\n已取消下载")
-        sys.exit(0)
-
+        print("\n批量识别模型 (必选一起):")
+        add_batch = input("  添加批量模型? (y/n): ").strip().lower() == 'y'
+        if add_batch: models_to_download.extend(batch_models)
+        print("\nLLM模型:")
+        for i, m in enumerate(gguf_models): print(f"  {i+1}. {m['name']}")
+        llm = input("选择LLM (序号,留空跳过): ").strip()
+        if llm.isdigit() and 0 <= int(llm)-1 < len(gguf_models):
+            idx = int(llm)-1
+            if idx <= 1:  # 如果选part1或part2，都下载
+                models_to_download.extend(gguf_models[:2])
+            else:
+                models_to_download.append(gguf_models[idx])
+    elif choice == "6": return
     else:
-        print("\n❌ 无效的选项")
-        sys.exit(1)
+        print("无效选项")
+        return
 
-    # 开始下载
-    print(f"\n开始下载 {len(models_to_download)} 个模型...")
-    for model in models_to_download:
-        model_id = model["id"]
-        model_name = model["name"]
+    if not models_to_download:
+        print("未选择模型")
+        return
 
-        # 根据模型类型选择下载方式
-        if "Qwen" in model_id:
-            # LLM模型使用snapshot_download
-            success = download_llm_model(model_id, model_name)
-        elif "ClearerVoice" in model_id:
-            # 语音增强模型使用pipeline
-            success = download_pipeline_model(
-                model_id, model_name, task="acoustic_noise_suppression"
-            )
+    # 下载
+    success = 0
+    print(f"\n{'='*60}\n开始下载 {len(models_to_download)} 个模型\n{'='*60}")
+    for m in models_to_download:
+        t = m.get("type", "asr")
+        if t == "gguf":
+            r = download_gguf_model(m["repo_id"], m["filename"], m["name"])
         else:
-            # ASR模型使用AutoModel
-            success = download_model(model_id, model_name)
+            r = download_model(m["id"], m["name"])
+        if r: success += 1
 
-        if success:
-            success_count += 1
-
-    # 总结
-    print("\n" + "=" * 60)
-    print("下载完成!")
-    print("=" * 60)
-    print(f"✅ 成功: {success_count}/{len(models_to_download)} 个模型")
-
-    if success_count > 0:
+    print(f"\n{'='*60}\n下载完成! ✅ {success}/{len(models_to_download)}\n{'='*60}")
+    if success > 0:
         print("\n💡 提示:")
-        print("  - 模型已保存到 ./Model/ 目录")
-        print("  - 现在可以运行: python main.py")
-        print('  - 批量识别默认启用热词 (hotword="魔搭"),可在 main.py 中修改')
-        print("  - 或使用: ./restart_server.sh")
-        if any("Qwen" in m["id"] for m in models_to_download):
-            print("\n🚀 LLM后处理配置:")
-            print("  - 设置环境变量: ENABLE_LLM_POSTPROCESS=1")
-            print("  - 需要GPU支持: LLM_DEVICE=cuda")
-        if any("ClearerVoice" in m["id"] for m in models_to_download):
-            print("\n🎯 语音增强配置:")
-            print("  - 设置环境变量: ENABLE_AUDIO_ENHANCEMENT=1")
-
-    print("")
+        print("  - 模型保存在: ./Model/")
+        print("  - 运行服务器: python main.py")
+        if any(m.get("type")=="gguf" for m in models_to_download):
+            print("\n🚀 LLM配置:")
+            print("  pip install llama-cpp-python")
+            print("  enable_llm_postprocess=True")
+            print("  llm_model_path='./Model/models/Qwen/*.gguf'")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断下载")
+        print("\n\n⚠️  中断")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ 发生错误: {e}")
+        print(f"\n❌ 错误: {e}")
         import traceback
-
         traceback.print_exc()
         sys.exit(1)

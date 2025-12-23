@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""FunASR 实时流式语音识别客户端 v0.3.0
+"""FunASR 实时流式语音识别客户端 v4.0.0
 
 集成麦克风录音、实时显示和输入法模式的流式识别客户端
 
 功能:
 - 实时麦克风录音: 16kHz 采样率，支持自定义音频设备
 - 流式识别: 使用 Paraformer-Streaming 模型，低延迟输出（600ms）
+- 智能后处理: 统一流式后处理器（ASR听清 + LLM说人话）
 - 两种工作模式:
   * 显示模式: 将识别结果显示在终端（默认）
   * 输入法模式: 将识别结果作为键盘输入发送到焦点窗口
@@ -19,8 +20,8 @@
 - 语音输入到任何应用程序（输入法模式）
 - 语音撰写文档（输入法模式）
 
-版本: 0.3.0
-更新日期: 2025-12-05
+版本: 4.0.0
+更新日期: 2025-12-23
 """
 
 import asyncio
@@ -224,26 +225,32 @@ class UnifiedRealtimeClient:
                         text = data.get("text", "")
                         is_final = data.get("is_final", False)
                         chunk_num = data.get("chunk_number", 0)
+                        llm_optimized = data.get("llm_optimized", False)
+                        buffering = data.get("buffering", False)
+                        should_output = data.get("should_output", False)
 
-                        # 只处理有文本内容的结果
-                        if text and text.strip():
+                        # 核心逻辑：只在服务端明确标记 should_output=True 时才输出
+                        # 这意味着：
+                        # 1. 服务端已完成句子边界检测和文本合并
+                        # 2. LLM 后处理已完成（如果启用）
+                        # 3. 是一个完整的语义单元，可以展示给用户
+                        if text and text.strip() and should_output:
+                            # 服务端已经处理好的完整段落，直接输出
+                            status = "✓" if llm_optimized else "ASR"
+
                             if self.input_mode:
                                 # 输入法模式：作为键盘输入
-                                if self.output_all or is_final:
-                                    if is_final:
-                                        self.log(f"[{chunk_num}] ✓ {text}")
-                                    else:
-                                        self.log(f"[{chunk_num}] ... {text}")
-                                    self.type_text(text)
-                                else:
-                                    self.log(f"[{chunk_num}] 跳过中间结果")
+                                self.log(f"[{status}] {text}")
+                                self.type_text(text)
                             else:
                                 # 显示模式：在终端显示
-                                if is_final:
-                                    print(f"\n[{chunk_num}] ✓ {text}")
-                                    self.results.append(text)
-                                else:
-                                    print(f"\n[{chunk_num}] ... {text}")
+                                print(f"\n[{status}] {text}")
+                                self.results.append(text)
+
+                        # 显示缓冲状态（调试用）
+                        elif buffering and self.show_status and self.output_all:
+                            preview = text[:30] if text else "等待语音输入"
+                            self.log(f"[缓冲中] {preview}...")
 
                     elif data.get("type") == "started":
                         self.log(f"✓ {data['message']}")
@@ -472,19 +479,30 @@ async def main():
 
 工作模式:
   显示模式（默认）:
-    - 将识别结果显示在终端
+    - 显示服务端处理好的完整文本
     - 适合语音转文字记录、会议记录等
+    - 服务端已实现智能句子边界检测和缓冲
 
   输入法模式（--input-mode）:
-    - 将识别结果作为键盘输入发送到焦点窗口
+    - 将服务端处理好的文本作为键盘输入
     - 适合语音输入到文本编辑器、聊天软件等
     - Linux 推荐安装 xdotool: sudo apt-get install xdotool
+
+输出控制:
+  默认模式：只输出最终结果（推荐）
+    - 服务端自动进行句子边界检测和文本缓冲
+    - 输出连贯的人类语言句子
+    - LLM优化后的文本自动标记
+
+  --output-all：输出所有识别结果
+    - 包括中间结果
+    - 适合调试或实时查看识别过程
 
 提示:
   - 按 Ctrl+C 停止录音
   - 建议在安静环境中使用
   - 输入法模式需要确保目标应用的输入框已获得焦点
-  - 使用 --output-all 可以输出所有识别结果（包括中间结果）
+  - 服务端已实现智能文本处理，客户端直接显示结果
         """,
     )
 

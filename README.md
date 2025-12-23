@@ -5,7 +5,7 @@
 [![FastMCP](https://img.shields.io/badge/FastMCP-2.5.1%2B-orange.svg)](https://github.com/jlowin/fastmcp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> 专业的中文语音识别MCP服务器，支持实时流式识别、语音增强和LLM后处理
+> 专业的中文语音识别MCP服务器，支持实时流式识别和LLM后处理
 
 **快速导航**: [快速开始](#-快速开始) • [功能特性](#-功能特性) • [使用指南](#-使用指南) • [API文档](#-api-端点)
 
@@ -19,8 +19,7 @@
 
 - 🏆 **高精度识别** - 采用Paraformer系列模型，业界领先准确率
 - ⚡ **低延迟流式** - 600ms实时响应，支持对话式交互
-- 🔇 **专业降噪** - ClearerVoice-Studio深度语音增强
-- 🤖 **AI后处理** - Qwen2.5-7B蒸馏模型智能优化识别文本
+- 🤖 **AI后处理** - Qwen2.5-7B GGUF模型智能优化识别文本
 - 🔒 **本地部署** - 完全离线运行，数据隐私安全
 - 🌐 **标准协议** - 完整实现MCP规范，易于集成
 
@@ -40,10 +39,8 @@
 
 | 功能 | 说明 | 技术 |
 |------|------|------|
-| **语音增强** | 专业级降噪处理 | ClearerVoice-Studio |
-| **噪声抑制** | 多场景降噪（空调/键盘/环境噪音） | DNS-Challenge |
-| **VAD检测** | 智能语音活动检测 | 模型内置 |
-| **LLM优化** | 智能文本后处理 | Qwen2.5-7B |
+| **VAD检测** | 智能语音活动检测 | FSMN-VAD |
+| **流式优化** | 智能文本后处理（实时识别） | Qwen2.5-7B GGUF |
 
 ### 🛠️ 系统能力
 
@@ -78,11 +75,11 @@ chmod +x setup.sh
 ### 步骤2: 启动服务
 
 ```bash
-# 基础启动（默认启用语音增强和LLM后处理）
+# 基础启动（默认启用LLM后处理）
 python main.py
 
-# 仅ASR模式（关闭LLM，节省资源）
-# 修改 main.py 中 Config.ENABLE_LLM_POSTPROCESS = False
+# 仅ASR模式（关闭后处理器，节省资源）
+# 修改 main.py 中 Config.ENABLE_POSTPROCESSOR = False
 
 # 生产环境（多进程）
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
@@ -90,9 +87,11 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 
 **首次启动**: 会自动下载所需模型到 `./Model` 目录
 
-- ASR模型: ~3GB (Paraformer系列)
-- 语音增强: ~100MB (ClearerVoice-Studio)
-- LLM模型: ~14GB (Qwen2.5-7B-Instruct)
+- ASR模型: ~1.8GB (实时 Paraformer-Streaming)
+- ASR模型: ~1.0GB (批量 Paraformer-large)
+- VAD模型: ~4MB (FSMN-VAD)
+- 批量增强: ~283MB (CT-Punc 标点) + ~28MB (CAM++ 说话人)
+- LLM模型: ~4.5GB (Qwen2.5-7B-Instruct GGUF)
 
 ### 步骤3: 验证服务
 
@@ -150,25 +149,14 @@ ws.onmessage = (event) => {
 
 ```mermaid
 graph LR
-    A[音频输入<br/>16kHz PCM] --> B[语音增强<br/>ClearerVoice]
-    B --> C[语音识别<br/>Paraformer]
-    C --> D[LLM后处理<br/>Qwen3]
-    D --> E[识别结果<br/>优化文本]
+    A[音频输入<br/>16kHz PCM] --> B[语音识别<br/>Paraformer]
+    B --> C[LLM后处理<br/>Qwen2.5-7B]
+    C --> D[识别结果<br/>优化文本]
 ```
 
 ### 核心技术栈
 
-#### 1. 语音增强 - ClearerVoice-Studio
-
-**技术**: DNS-Challenge (Deep Noise Suppression)
-**模型**: iic/ClearerVoice-Studio
-**功能**: 深度降噪、去混响、语音清晰度提升
-
-- 🔇 专业级多场景降噪（空调、键盘、环境噪音）
-- ⚡ 实时处理，延迟可控
-- 🎯 显著提升识别准确率
-
-#### 2. 语音识别 - Paraformer系列
+#### 1. 语音识别 - Paraformer系列
 
 **模型**: Paraformer-large / Paraformer-Streaming
 **特性**: 内置VAD、高精度、低延迟
@@ -178,24 +166,29 @@ graph LR
 - 👥 说话人分离（CAM++）
 - ⚡ 600ms实时响应
 
-#### 3. LLM后处理 - Qwen2.5-7B
+#### 2. 流式后处理器 - 统一优化架构
 
-**模型**: Qwen2.5-7B-Instruct (蒸馏版)
-**功能**: 智能文本优化
-**特点**: 轻量级、快速推理、低资源占用
+**协同设计**: ASR听清 + LLM说人话
+**模型**: Qwen2.5-7B-Instruct GGUF (Q4_K_M)
+**特点**: 智能缓冲、上下文感知、质量保证
 
-- ✨ 口语转书面语
-- 📝 优化标点和分段
-- 🎯 修正语法错误
-- 💡 保持原意不失真
+- ✨ 口语转书面语（LLM优化）
+- 📝 基于停顿的智能句子检测（VAD驱动）
+- 🎯 多层Fallback机制（LLM → 规则 → 原文）
+- 💡 词级时间戳对齐
+- 🔍 质量检查和验证
+
+**工作原理**：
+- 说话时持续累积文本
+- 停顿时（VAD检测到静音）输出完整段落
+- 不基于标点符号强制分割
 
 ### 技术优势
 
 | 特性 | 传统方案 | 本方案 |
 |------|---------|--------|
-| 降噪方案 | 简单滤波器 | ✅ DNS-Challenge深度学习 |
 | VAD检测 | 独立模块 | ✅ 模型内置，零延迟 |
-| 文本优化 | 规则后处理 | ✅ LLM智能优化 |
+| 文本优化 | 规则后处理 | ✅ 流式后处理器（智能缓冲+上下文+质量检查） |
 | 部署方式 | 依赖API | ✅ 完全本地化 |
 | 数据安全 | 云端传输 | ✅ 本地处理 |
 
@@ -218,15 +211,16 @@ class Config:
     # 实时识别
     REALTIME_MODEL = "paraformer-zh-streaming"
     REALTIME_CHUNK_SIZE = [0, 10, 5]  # 600ms延迟
-    REALTIME_DEVICE = "cpu"           # 或 "cuda"
 
     # 批量识别
     BATCH_MODEL = "paraformer-zh"
     BATCH_VAD_MODEL = "fsmn-vad"
     BATCH_PUNC_MODEL = "ct-punc-c"
     BATCH_SPK_MODEL = "cam++"
-    BATCH_DEVICE = "cpu"
     BATCH_HOTWORD = "魔搭"            # 热词定制
+
+    # 设备自动检测（v3.0.0+）
+    # 无需手动配置DEVICE，系统会自动检测GPU/CPU
 ```
 
 ### 延迟优化
@@ -242,13 +236,15 @@ class Config:
 ### 功能开关
 
 ```python
-    # 语音增强（推荐开启）
-    ENABLE_AUDIO_ENHANCEMENT = True
-    
-    # LLM后处理（需要GPU或较强CPU）
-    ENABLE_LLM_POSTPROCESS = True
-    LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # 7B蒸馏模型
-    LLM_DEVICE = "cuda"  # cuda(GPU) 或 cpu
+    # 流式后处理器（v4.0.0+ 统一架构）
+    ENABLE_POSTPROCESSOR = True
+    POSTPROCESSOR_MODEL_PATH = "Model/models/Qwen/qwen2.5-7b-instruct-q4_k_m.gguf"
+    POSTPROCESSOR_N_GPU_LAYERS = None  # 自动检测GPU并分配层数
+    POSTPROCESSOR_TEMPERATURE = 0.3
+    POSTPROCESSOR_CONTEXT_WINDOW = 3
+    POSTPROCESSOR_MIN_BUFFER = 2
+    POSTPROCESSOR_MAX_BUFFER = 5
+    POSTPROCESSOR_QUALITY_CHECK = True
 ```
 
 **硬件建议**:
@@ -293,32 +289,32 @@ mcp-server-funasr/
 ├── core/                         # 核心模块
 │   ├── batch_transcriber.py      # 批量识别器
 │   ├── realtime_transcriber.py   # 实时识别器
-│   ├── audio_enhancer.py         # 语音增强器
-│   └── llm_postprocessor.py      # LLM后处理器
+│   ├── streaming_postprocessor.py # 统一流式后处理器
+│   └── device_utils.py           # 设备检测工具
 ├── audio/                        # 测试音频样本
 └── Model/                        # 模型缓存(自动下载)
     └── models/
-        ├── iic/                  # FunASR + ClearerVoice
-        └── Qwen/                 # Qwen2.5-7B-Instruct
+        ├── iic/                  # FunASR 模型
+        └── Qwen/                 # Qwen2.5-7B-Instruct GGUF
 ```
 
 ## ❓ 常见问题
 
-### Q: LLM后处理需要GPU吗？
+### Q: 流式后处理器需要GPU吗？
 
 **A**: 推荐使用GPU，但非必需
 
 - **GPU模式**: ~14GB显存，推理快 (推荐)
 - **CPU模式**: 较慢但可用，需要16GB+内存
 
-配置: 修改 `main.py` 中 `Config.LLM_DEVICE = "cpu"`
+配置: 修改 `main.py` 中 `Config.POSTPROCESSOR_N_GPU_LAYERS = 0` (强制CPU)
 
 ### Q: 如何降低资源占用？
 
-**A**: 可以关闭LLM后处理
+**A**: 可以关闭流式后处理器
 
 ```python
-Config.ENABLE_LLM_POSTPROCESS = False  # 仅使用ASR
+Config.ENABLE_POSTPROCESSOR = False  # 仅使用ASR
 ```
 
 这样只需要 ~3GB 磁盘空间和 8GB 内存。
@@ -370,14 +366,11 @@ curl http://localhost:8000/connections
 ### ASR 优化
 
 ```python
-# GPU优化 (默认)
-Config.BATCH_DEVICE = "cuda"       # 使用GPU加速
-Config.REALTIME_DEVICE = "cuda"    # 实时识别也使用GPU
-Config.BATCH_SIZE_S = 300          # 调整批处理大小
+# v3.0.0+ 设备自动检测，无需手动配置
+# 系统会自动选择最佳设备（GPU优先，CPU备选）
 
-# CPU模式 (备选)
-Config.BATCH_DEVICE = "cpu"        # 如无GPU可用
-Config.BATCH_NCPU = 8              # 增加CPU线程数
+Config.BATCH_SIZE_S = 300          # 调整批处理大小
+Config.BATCH_NCPU = 8              # CPU线程数（多线程加速）
 ```
 
 ### LLM 优化
@@ -423,7 +416,6 @@ uvicorn main:app --workers 4 --host 0.0.0.0 --port 8000
 - [FunASR](https://github.com/modelscope/FunASR) - 阿里达摩院语音实验室提供的强大ASR框架
 - [FastMCP](https://github.com/jlowin/fastmcp) - 优秀的MCP协议框架
 - [ModelScope](https://www.modelscope.cn/) - 提供模型托管和下载服务
-- [ClearerVoice-Studio](https://www.modelscope.cn/models/iic/ClearerVoice-Studio) - 专业语音增强模型
 - [Qwen2.5](https://www.modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct) - 智能文本后处理支持
 
 ## 🔗 相关链接
@@ -435,8 +427,8 @@ uvicorn main:app --workers 4 --host 0.0.0.0 --port 8000
 
 ---
 
-**当前版本**: v0.5.0
-**最后更新**: 2025-12-05
+**当前版本**: v4.0.0
+**最后更新**: 2025-12-23
 **作者**: WAASSTT
 
 [⬆ 返回顶部](#️-funasr-mcp-服务器)

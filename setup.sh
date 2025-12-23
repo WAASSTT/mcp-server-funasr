@@ -67,7 +67,15 @@ fi
 model_count=$(find Model -name "model.pt" 2>/dev/null | wc -l)
 if [ "$model_count" -eq 0 ]; then
     echo -e "${YELLOW}💡 提示: 未检测到已下载的模型${NC}"
-    echo -e "${YELLOW}   首次运行时会自动从ModelScope下载(约1.1GB)${NC}"
+    echo -e "${YELLOW}   首次运行时会自动从 ModelScope 下载：${NC}"
+    echo -e "${YELLOW}   【实时识别】${NC}"
+    echo -e "${YELLOW}   - Paraformer-Streaming: ~850MB (实时ASR)${NC}"
+    echo -e "${YELLOW}   - FSMN-VAD: ~4MB (VAD检测)${NC}"
+    echo -e "${YELLOW}   - Qwen2.5-7B GGUF: ~4.5GB (LLM后处理)${NC}"
+    echo -e "${YELLOW}   【批量识别】${NC}"
+    echo -e "${YELLOW}   - Paraformer-large: ~950MB (批量ASR)${NC}"
+    echo -e "${YELLOW}   - CT-Punc: ~283MB (标点恢复)${NC}"
+    echo -e "${YELLOW}   - CAM++: ~28MB (说话人分离)${NC}"
     echo ""
     read -p "是否现在预下载模型? (y/N) " -n 1 -r
     echo
